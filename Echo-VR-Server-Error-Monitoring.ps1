@@ -1,5 +1,5 @@
 ###################################################################
-#Code by marcel_One_
+#Code by marshmallow_mia
 #Checks for errors and restarts the server. Also checks for the right amount of servers running.
 #Do what you want with it, but I dont take any responsibility
 #Please contact me if you found bugs or for feature requests
@@ -361,3 +361,4 @@ sleep $delay_for_process_checking
 #added the possibility to add the amount of needed server instances behind the script like "pswhEcho-VR-Server-Error-Monitoring.ps1 5"
 #08.04.2024
 #added a function to check for stuck servers
+
