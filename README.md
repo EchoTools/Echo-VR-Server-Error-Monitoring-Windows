@@ -8,3 +8,11 @@ To set it up open the file and change the info as necessary in the `THINGS YOU H
 > [!TIP]
 > Ensure you have installed Powershell 7 beforehand by running `winget install --id Microsoft.PowerShell --source winget` in a terminal.
 > You may also need to allow script execution by running `Set-ExecutionPolicy Bypass` in an admin terminal.
+
+### Usage
+You can quickly run the script by creating a batch file with the following line: `pwsh Echo-VR-Server-Error-Monitoring.ps1`
+
+If you'd like to hide the terminal window, put this in your batch file isntead: `start /min pwsh -windowstyle hidden -file new-monitor.ps1`
+
+Right-click the system tray icon to open the menu.
+<img width="453" height="272" alt="image" src="https://github.com/user-attachments/assets/afb38d84-77fd-497a-9af5-45ce336aa82d" />
