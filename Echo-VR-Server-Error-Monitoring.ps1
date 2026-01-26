@@ -13,11 +13,10 @@ param (
 )
 
 ####### THINGS YOU HAVE TO SET UP #######
-$processName = "echovr" 
-$amountOfInstances = 4 
-$global:filepath = "C:\Program Files\Oculus\Software\Software\ready-at-dawn-echo-arena" 
-$region = "us-central-2";
-$global:delayForKillingIfStuck = 20 # time in minutes
+$amountOfInstances = 2 # number of game servers you want to run
+$global:filepath = "C:\Program Files\Oculus\Software\Software\ready-at-dawn-echo-arena" # path to the main echo directory, without the \ at the end
+$region = "us-central-2"; # see below for region IDs
+$global:delayForKillingIfStuck = 20 # time in minutes before a stuck server will restart
 
 # for $region, use one of the following:
 #  "uscn", // US Central North (Chicago)
@@ -30,13 +29,14 @@ $global:delayForKillingIfStuck = 20 # time in minutes
 #  "sin", // Singapore oce region
 
 ####### ADDITIONAL SETTINGS #######
+# If you don't know what's going on here, just leave it as-is.
 $global:errors = "Unable to find MiniDumpWriteDump", "[NETGAME] Service status request failed: 400 Bad Request", "[NETGAME] Service status request failed: 404 Not Found", "[TCP CLIENT] [R14NETCLIENT] connection to ws:///login", "[TCP CLIENT] [R14NETCLIENT] connection to failed", `
  "[TCP CLIENT] [R14NETCLIENT] connection to established", "[TCP CLIENT] [R14NETCLIENT] connection to restored", "[TCP CLIENT] [R14NETCLIENT] connection to closed", "[TCP CLIENT] [R14NETCLIENT] Lost connection (okay) to peer", "[NETGAME] Service status request failed: 502 Bad Gateway", `
  "[NETGAME] Service status request failed: 0 Unknown"
 $global:delay_for_exiting = 30 
 $global:delay_for_process_checking = 3 
 $flags =  "-numtaskthreads 2 -server -headless -noovr -server -fixedtimestep -nosymbollookup -timestep 120" 
-
+$processName = "echovr"
 
 
 
@@ -263,3 +263,4 @@ $form.WindowState = "Minimized"
 #added a function to check for stuck servers
 #26.01.2026
 #moved all user-facing outputs to the system tray menu (berg)
+
