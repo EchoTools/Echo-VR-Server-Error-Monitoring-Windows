@@ -7,6 +7,7 @@ To set it up open the file and change the info as necessary in the `THINGS YOU H
 
 > [!TIP]
 > Ensure you have installed Powershell 7 beforehand by running `winget install --id Microsoft.PowerShell --source winget` in a terminal.
+>
 > You may also need to allow script execution by running `Set-ExecutionPolicy Bypass` in an admin terminal.
 
 ### Usage
@@ -16,6 +17,7 @@ If you'd like to hide the terminal window, put this in your batch file isntead: 
 
 > [!NOTE]
 > Unless you input the entire filepath in your batch file, it will need to be in the same directory as the .ps1 script.
+>
 > You should probably make a shortcut to the batch file and put it in the startup folder as well.
 
 Right-click the system tray icon to open the menu.
