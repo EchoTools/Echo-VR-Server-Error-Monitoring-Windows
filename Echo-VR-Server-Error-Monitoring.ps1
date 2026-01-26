@@ -6,15 +6,16 @@
 #Sorry for weird german variable names at some points
 #Echo <3
 ###################################################################
+
 param (
     [Parameter(Mandatory=$false)]
     [int]$Instances
 )
 
 ####### THINGS YOU HAVE TO SET UP #######
-$processName = "echovr" # without the '.exe'
-$amountOfInstances = 2 # number of servers you want to run 
-$global:filepath = "C:\Program Files\Oculus\Software\Software\ready-at-dawn-echo-arena" # do not include \ at the end
+$processName = "echovr" 
+$amountOfInstances = 4 
+$global:filepath = "C:\Program Files\Oculus\Software\Software\ready-at-dawn-echo-arena" 
 $region = "us-central-2";
 $global:delayForKillingIfStuck = 20 # time in minutes
 
@@ -29,7 +30,6 @@ $global:delayForKillingIfStuck = 20 # time in minutes
 #  "sin", // Singapore oce region
 
 ####### ADDITIONAL SETTINGS #######
-# If you don't know what these do, you can leave them alone
 $global:errors = "Unable to find MiniDumpWriteDump", "[NETGAME] Service status request failed: 400 Bad Request", "[NETGAME] Service status request failed: 404 Not Found", "[TCP CLIENT] [R14NETCLIENT] connection to ws:///login", "[TCP CLIENT] [R14NETCLIENT] connection to failed", `
  "[TCP CLIENT] [R14NETCLIENT] connection to established", "[TCP CLIENT] [R14NETCLIENT] connection to restored", "[TCP CLIENT] [R14NETCLIENT] connection to closed", "[TCP CLIENT] [R14NETCLIENT] Lost connection (okay) to peer", "[NETGAME] Service status request failed: 502 Bad Gateway", `
  "[NETGAME] Service status request failed: 0 Unknown"
@@ -44,6 +44,25 @@ $flags =  "-numtaskthreads 2 -server -headless -noovr -server -fixedtimestep -no
 #############################################################
 # DON'T TOUCH ANYTHING BELOW OR WE'LL VISIT YOU AT NIGHT
 #############################################################
+
+# PS7 Check
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    Write-Host "Old PowerShell version detected ($($PSVersionTable.PSVersion.Major)). Checking for PowerShell 7..." -ForegroundColor Yellow
+    
+    if (!(Get-Command pwsh -ErrorAction SilentlyContinue)) {
+        Write-Host "PowerShell 7 not found. Attempting installation via winget..." -ForegroundColor Cyan
+        if (!(Get-Command winget -ErrorAction SilentlyContinue)) {
+            Write-Error "winget not found. Please install PowerShell 7 manually from https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell-on-windows?view=powershell-7.5"
+            pause
+            exit
+        }
+        winget install --id Microsoft.PowerShell --source winget --silent --accept-source-agreements --accept-package-agreements
+    }
+
+    Write-Host "Relaunching script in PowerShell 7..." -ForegroundColor Green
+    & pwsh -File $PSCommandPath $args
+    exit
+}
 
 if ($Instances) { $amountOfInstances = $Instances }
 
