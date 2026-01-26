@@ -6,7 +6,7 @@ It will automatically handle crashes/errors and auto-restart when necessary.
 To set it up open the file and change the info as necessary in the `THINGS YOU HAVE TO SET UP` section.
 
 > [!TIP]
-> Ensure you have installed Powershell 7 beforehand by running `winget install --id Microsoft.PowerShell --source winget` in a terminal.
+> The script will install Powershell 7 for you. Just right click > Run With Powershell to get started.
 >
 > You may also need to allow script execution by running `Set-ExecutionPolicy Bypass` in an admin terminal.
 
