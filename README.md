@@ -1,23 +1,25 @@
 # Echo-VR-Server-Error-Monitoring
 
 This script is made for checking of errors running on Echo VR Server Instances.
-It will restart them and checks if enough Instances are running at all.
+It will automatically handle crashes/errors and auto-restart when necessary.
 
-To set it up open the file.
-There is a #######THINGS YOU HAVE TO SET UP!!!####### Section you NEED to change
+Before you do anything, open the file and change the info as necessary in the `THINGS YOU HAVE TO SET UP` section.
 
-If you give the script an Input behind it, it will use that as the Amount of wanted running server instances.
-So like:
+> [!TIP]
+> The script will install Powershell 7 for you. Just right click > Run With Powershell to get started.
+>
+> You may also need to allow script execution by running `Set-ExecutionPolicy Bypass` in an admin terminal.
 
-```
- pwsh Echo-VR-Server-Error-Monitoring.ps1 5
-```
-No need to do so
+### Usage
+You can quickly run the script by creating a batch file with the following line: `pwsh Echo-VR-Server-Error-Monitoring.ps1`
 
-**As this script installes Powershell 7, if it isnt already installed, you might need to start it with admin rights on your first start!**
+If you'd like to hide the terminal window, put this in your batch file isntead: `start /min pwsh -windowstyle hidden -file Echo-VR-Server-Error-Monitoring.ps1`
 
+> [!NOTE]
+> Unless you input the entire filepath in your batch file, it will need to be in the same directory as the .ps1 script.
+>
+> You should probably make a shortcut to the batch file and put it in the startup folder as well.
 
-FEATURES:
-- checks for errors
-- cheks for chrahed servers
-- restarts stuck servers
+Right-click the system tray icon to open the menu.
+
+<img width="453" height="272" alt="image" src="https://github.com/user-attachments/assets/afb38d84-77fd-497a-9af5-45ce336aa82d" />
