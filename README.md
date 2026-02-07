@@ -1,3 +1,5 @@
+## Setting up a new server? Check the [wiki](https://github.com/EchoTools/Echo-VR-Server-Error-Monitoring-Windows/wiki/Setup-Guide)
+
 # Echo-VR-Server-Error-Monitoring
 
 This script is made for checking of errors running on Echo VR Server Instances.
