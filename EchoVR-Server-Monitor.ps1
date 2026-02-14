@@ -1,21 +1,25 @@
 ###################################################################
-# Code by marshmallow_mia and berg_
+# Code by marshmallow_mia and now mostly berg_
 # Server monitor lives in the system tray :)
 # Echo <3
 ###################################################################
 
+# Changes 
+# v1.1.0 - Removed PS7 dialogue (auto install). Added pause spawning option, instance uptime tracking, unlinked session detection.
+# v1.0.0 - Initial general release
+
 # ==============================================================================
 # GLOBAL SETTINGS
 # ==============================================================================
-$Global:Version = "1.0.0"
+$Global:Version = "1.1.0"
 $Global:GithubOwner = "EchoTools"
 $Global:GithubRepo  = "EchoVR-Windows-Hosts-Resources"
-
+$Global:NotifiedPids = @{}
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 # ==============================================================================
-# 0. MODE DETECTION & PS7 CHECK
+# 0. MODE DETECTION, PS7 CHECK, SINGLE INSTANCE CHECK
 # ==============================================================================
 
 # Detect if running as a compiled .exe or a raw .ps1 script
@@ -32,9 +36,6 @@ if ($ProcessName -eq "pwsh" -or $ProcessName -eq "powershell" -or $ProcessName -
 
 # If running as a script (not compiled), ensure PowerShell 7 is present
 if (-not $Global:IsBinary -and $PSVersionTable.PSVersion.Major -lt 7) {
-    $msgResult = [System.Windows.Forms.MessageBox]::Show("This monitor runs best on PowerShell 7.`n`nWould you like to install it now?", "Upgrade Recommended", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
-    
-    if ($msgResult -eq [System.Windows.Forms.DialogResult]::Yes) {
         try {
             # Attempt to install via Winget
             Start-Process -FilePath "winget" -ArgumentList "install --id Microsoft.PowerShell --source winget" -Wait -Verb RunAs
@@ -43,13 +44,9 @@ if (-not $Global:IsBinary -and $PSVersionTable.PSVersion.Major -lt 7) {
         } catch {
             [System.Windows.Forms.MessageBox]::Show("Could not launch Winget. Please install PowerShell 7 manually from https://github.com/PowerShell/PowerShell", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
             Exit
-        }
     }
 }
 
-# ==============================================================================
-# 0.5 SINGLE INSTANCE CHECK
-# ==============================================================================
 $mutexName = "EchoVRServerMonitor_Mutex_Global"
 $mutex = New-Object System.Threading.Mutex($false, $mutexName)
 if (-not $mutex.WaitOne(0, $false)) {
@@ -105,8 +102,6 @@ if (-not (Test-Path $EchoExePath)) {
 
 if (-not (Test-Path $DashboardDir)) { New-Item -ItemType Directory -Path $DashboardDir -Force | Out-Null }
 
-# Removed setup.json validation check here
-
 # ==============================================================================
 # 3. CONFIGURATION MANAGEMENT
 # ==============================================================================
@@ -123,6 +118,7 @@ Function Get-MonitorConfig {
             additionalArgs = "-server -headless -noovr -fixedtimestep -nosymbollookup"
             suppressSetupWarning = $false
             autoUpdate = $true
+            pauseSpawning = $false
         }
         if (Test-Path $SetupFile) {
             $dashData = Get-Content $SetupFile -Raw | ConvertFrom-Json
@@ -132,12 +128,20 @@ Function Get-MonitorConfig {
         return $defaultConfig
     }
     
-    # Ensure autoUpdate exists for older configs
+    # Ensure properties exist for older configs
     $config = Get-Content $MonitorFile -Raw | ConvertFrom-Json
+    $saveNeeded = $false
+
     if ($null -eq $config.autoUpdate) {
         $config | Add-Member -MemberType NoteProperty -Name "autoUpdate" -Value $true
-        Save-MonitorConfig $config
+        $saveNeeded = $true
     }
+    if ($null -eq $config.pauseSpawning) {
+        $config | Add-Member -MemberType NoteProperty -Name "pauseSpawning" -Value $false
+        $saveNeeded = $true
+    }
+
+    if ($saveNeeded) { Save-MonitorConfig $config }
     return $config
 }
 
@@ -171,17 +175,14 @@ Function Switch-StartupShortcut ($enable) {
             if ($Global:IsBinary) {
                 $Shortcut.TargetPath = $Global:ExecutionPath
                 $Shortcut.WorkingDirectory = $ScriptRoot
-                $Shortcut.Arguments = "" # Ensure no leftover script args
+                $Shortcut.Arguments = "" 
             } else {
-                # Prefer pwsh (PS7), fall back to powershell
                 $exe = if (Get-Command "pwsh" -ErrorAction SilentlyContinue) { "pwsh.exe" } else { "powershell.exe" }
                 $Shortcut.TargetPath = $exe
-                # Force Hidden WindowStyle so no console pops up
                 $Shortcut.Arguments = "-WindowStyle Hidden -File `"$Global:ExecutionPath`""
                 $Shortcut.WorkingDirectory = $ScriptRoot
             }
             
-            # Set Icon to EchoVR.exe so it looks nice in Startup
             if (Test-Path $EchoExePath) {
                 $Shortcut.IconLocation = $EchoExePath
             }
@@ -396,10 +397,10 @@ Function Show-ConfigWindow {
     $lblVersion = New-Object System.Windows.Forms.Label
     $lblVersion.Text = "v$($Global:Version)"
     $lblVersion.AutoSize = $false
-    $lblVersion.Size = New-Object System.Drawing.Size(435, 20) # Width matches form width
+    $lblVersion.Size = New-Object System.Drawing.Size(435, 20) 
     $lblVersion.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
     $lblVersion.ForeColor = [System.Drawing.Color]::Silver
-    $lblVersion.Location = New-Object System.Drawing.Point(0, ($y + 35)) # 35px below buttons
+    $lblVersion.Location = New-Object System.Drawing.Point(0, ($y + 35)) 
     $form.Controls.Add($lblVersion)
 
     $result = $form.ShowDialog()
@@ -430,13 +431,17 @@ Function Show-ConfigWindow {
 
 $ContextMenuStrip = New-Object System.Windows.Forms.ContextMenuStrip
 
+# 1. STATUS ITEM
 $MenuItemStatus = New-Object System.Windows.Forms.ToolStripMenuItem
 $MenuItemStatus.Text = "Status: Initializing..."
 $MenuItemStatus.Enabled = $false
 $ContextMenuStrip.Items.Add($MenuItemStatus) | Out-Null
 
-$ContextMenuStrip.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
+# 2. SEPARATOR (Marks end of dynamic list)
+$MenuItemSeparator1 = New-Object System.Windows.Forms.ToolStripSeparator
+$ContextMenuStrip.Items.Add($MenuItemSeparator1) | Out-Null
 
+# 3. CONFIG
 $MenuItemConfig = New-Object System.Windows.Forms.ToolStripMenuItem
 $MenuItemConfig.Text = "Edit Monitor Configuration"
 $MenuItemConfig.Add_Click({ 
@@ -446,11 +451,10 @@ $MenuItemConfig.Add_Click({
 })
 $ContextMenuStrip.Items.Add($MenuItemConfig) | Out-Null
 
-# --- Auto-Update Toggle ---
+# 4. AUTO-UPDATE
 $MenuItemAutoUpdate = New-Object System.Windows.Forms.ToolStripMenuItem
 $MenuItemAutoUpdate.Text = "Enable Auto-Update"
 $MenuItemAutoUpdate.CheckOnClick = $true
-$initialConfig = Get-MonitorConfig
 $MenuItemAutoUpdate.Checked = $initialConfig.autoUpdate
 
 $MenuItemAutoUpdate.Add_Click({
@@ -460,13 +464,11 @@ $MenuItemAutoUpdate.Add_Click({
 })
 $ContextMenuStrip.Items.Add($MenuItemAutoUpdate) | Out-Null
 
+# 5. STARTUP SHORTCUT
 $MenuItemStartup = New-Object System.Windows.Forms.ToolStripMenuItem
 $MenuItemStartup.Text = "Start with Windows"
 $MenuItemStartup.CheckOnClick = $true
 
-# FORCE SHORTCUT UPDATE ON START
-# This ensures that if the user moved from EXE to PS1, the old shortcut is overwritten 
-# with the correct arguments for the PS1 script.
 Switch-StartupShortcut $true
 $MenuItemStartup.Checked = $true
 
@@ -477,6 +479,21 @@ $ContextMenuStrip.Items.Add($MenuItemStartup) | Out-Null
 
 $ContextMenuStrip.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 
+# 6. PAUSE SPAWNING
+$MenuItemPause = New-Object System.Windows.Forms.ToolStripMenuItem
+$MenuItemPause.Text = "Pause Server Spawning"
+$MenuItemPause.CheckOnClick = $true
+$initialConfig = Get-MonitorConfig
+$MenuItemPause.Checked = $initialConfig.pauseSpawning
+
+$MenuItemPause.Add_Click({
+    $conf = Get-MonitorConfig
+    $conf.pauseSpawning = $MenuItemPause.Checked
+    Save-MonitorConfig $conf
+})
+$ContextMenuStrip.Items.Add($MenuItemPause) | Out-Null
+
+# 7. EXIT
 $MenuItemExit = New-Object System.Windows.Forms.ToolStripMenuItem
 $MenuItemExit.Text = "Exit"
 $MenuItemExit.Add_Click({
@@ -499,17 +516,16 @@ $NotifyIcon.Visible = $true
 $MonitorTimer = New-Object System.Windows.Forms.Timer
 $MonitorTimer.Interval = 3000
 
-# Helper to clean up background jobs so memory doesn't leak
+# Helper to clean up background jobs
 Function Clear-Jobs {
     Get-Job -State Completed | Remove-Job
 }
 
-# 1. STUCK CHECK: Restarts server if log hasn't changed in X seconds
+# 1. STUCK CHECK
 Function Start-Stuck-Watchdog ($procId, $timeoutMs) {
     $jobName = "${procId}_stuck"
     $timeoutSeconds = $timeoutMs / 1000
 
-    # Only start a watcher if one isn't already running for this PID
     if (-not (Get-Job -Name $jobName -ErrorAction SilentlyContinue)) {
         $logFile = Get-ChildItem -Path $LogPath -Filter "*_${procId}.log" -ErrorAction SilentlyContinue | 
                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -517,30 +533,21 @@ Function Start-Stuck-Watchdog ($procId, $timeoutMs) {
         if ($logFile) {
             $lastLine = Get-Content -Path $logFile.FullName -Tail 1 -ErrorAction SilentlyContinue
             
-            # Only start job if we successfully read a line
             if ($lastLine) {
                 Start-Job -Name $jobName -ArgumentList $lastLine, $procId, $timeoutSeconds, $logFile.FullName -ScriptBlock {
                     param($initialLine, $pidToKill, $limitSeconds, $logPath)
                     
                     $startTime = Get-Date
                     while ($true) {
-                        # 1. Timeout Check
                         if (((Get-Date) - $startTime).TotalSeconds -gt $limitSeconds) {
                             Stop-Process -Id $pidToKill -Force -ErrorAction SilentlyContinue
                             break 
                         }
-                        
-                        # 2. Activity Check
                         if (Test-Path $logPath) {
                             try {
-                                # Use ErrorAction Stop to trigger catch block if read fails
                                 $currentLine = Get-Content -Path $logPath -Tail 1 -ErrorAction Stop
-                                if ($initialLine -ne $currentLine) {
-                                    break # Server updated the log, it's alive.
-                                }
-                            } catch {
-                                # File locked or deleted? Just wait and retry.
-                            }
+                                if ($initialLine -ne $currentLine) { break }
+                            } catch {}
                         }
                         Start-Sleep -Seconds 5
                     }
@@ -550,7 +557,7 @@ Function Start-Stuck-Watchdog ($procId, $timeoutMs) {
     }
 }
 
-# 2. ERROR CHECK: Kills server if specific errors appear in log
+# 2. ERROR CHECK
 Function Test-LogErrors ($procId) {
     $logFile = Get-ChildItem -Path $LogPath -Filter "*_${procId}.log" -ErrorAction SilentlyContinue | 
                Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -559,9 +566,7 @@ Function Test-LogErrors ($procId) {
         $lastLine = Get-Content -Path $logFile.FullName -Tail 1 -ErrorAction SilentlyContinue
         
         if ($lastLine) {
-            # Clean the line (remove timestamp/IPs) for matching
             $lineClean = $lastLine -replace "^.*\]: ", "" -replace "[0-9]*\.[0-9]*\.[0-9]*\.[0-9]*:[0-9]*", "" -replace "ws://.* ", "" -replace " ws://.*api_key=.*",""  -replace "\?auth=.*", ""
-            
             if ($Global:ErrorList -contains $lineClean) {
                 Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
             }
@@ -569,34 +574,111 @@ Function Test-LogErrors ($procId) {
     }
 }
 
+# 3. LINK CODE CHECK
+Function Test-LinkCode ($procId) {
+    if ($Global:NotifiedPids.ContainsKey($procId)) { return }
+
+    # Find the log file
+    $logFile = Get-ChildItem -Path $LogPath -Filter "*_${procId}.log" -ErrorAction SilentlyContinue | 
+               Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+    if ($logFile) {
+        $lines = Get-Content -LiteralPath $logFile.FullName -Tail 5 -ErrorAction SilentlyContinue
+        
+        if ($null -eq $lines) { return }
+        
+        $content = $lines -join "`n"
+        
+        # Matches: [NETGAME] [DMO-...] Your Code is: >>> ABCD <<<
+        if ($content -match ">>>\s*(?<code>[A-Z0-9]+)\s*<<<") {
+            $code = $Matches['code'].Trim()
+            
+            if (-not [string]::IsNullOrWhiteSpace($code)) {
+                $Global:NotifiedPids[$procId] = $true
+                
+                # Using Start-Process to ensure the popup is visible over the game
+                $msgBody = "Your link code is: $code`n`n1. Go to #command-central in the Echo VR Lounge`n2. Click [Link EchoVRCE] and enter your code"
+                $msgTitle = "Link Code Detected"
+                
+                $cmd = "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('$msgBody', '$msgTitle', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)"
+                $bytes = [System.Text.Encoding]::Unicode.GetBytes($cmd)
+                $encodedCommand = [Convert]::ToBase64String($bytes)
+                
+                Start-Process -FilePath "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-EncodedCommand $encodedCommand" -WindowStyle Hidden
+            }
+        }
+    }
+}
+
+# Process Loop
 $MonitorAction = {
     $config = Get-MonitorConfig
     $MonitorTimer.Interval = $config.delayProcessCheck
 
     Clear-Jobs
 
-    $currentFlags = "-numtaskthreads $($config.numTaskThreads) -timestep $($config.timeStep) $($config.additionalArgs)"
-    
-    $processes = Get-Process -Name $EchoProcessName -ErrorAction SilentlyContinue
-    
+    $processes = @(Get-Process -Name $EchoProcessName -ErrorAction SilentlyContinue)
+    $runningCount = $processes.Count
+
+    # --- WATCHDOG CHECKS ---
     if ($processes) {
         foreach ($proc in $processes) {
             Test-LogErrors $proc.Id
             Start-Stuck-Watchdog $proc.Id $config.delayKillStuck
+            
+            # Check for Link Code
+            Test-LinkCode $proc.Id
+        }
+    }
+    
+    # ... rest of the MonitorAction block ...
+
+    # --- UPDATE MENU STATUS & UPTIME LIST ---
+    $MenuItemStatus.Text = "Active: $runningCount / $($config.amountOfInstances)                 v$($Global:Version)"
+
+    # Refresh dynamic process list
+    $sepIndex = $ContextMenuStrip.Items.IndexOf($MenuItemSeparator1)
+    
+    # Remove existing dynamic items (between Status and Separator)
+    # Loop backwards to safely remove
+    for ($i = $sepIndex - 1; $i -gt 0; $i--) {
+        $ContextMenuStrip.Items.RemoveAt($i)
+    }
+
+    # Add new process items
+    if ($processes) {
+        $pIndex = 1
+        # Sort by StartTime so the list doesn't jump around
+        $sortedProcs = $processes | Sort-Object StartTime
+        
+        foreach ($proc in $sortedProcs) {
+            try {
+                $uptime = New-TimeSpan -Start $proc.StartTime -End (Get-Date)
+                $txt = "{0}. PID {1} | {2}h {3}m {4}s" -f $pIndex, $proc.Id, $uptime.Hours, $uptime.Minutes, $uptime.Seconds
+                
+                $item = New-Object System.Windows.Forms.ToolStripMenuItem
+                $item.Text = $txt
+                $item.Enabled = $false # Just informational
+                
+                # Insert after Status (index 0)
+                $ContextMenuStrip.Items.Insert($pIndex, $item)
+                $pIndex++
+            } catch {
+                # Process might have closed during calculation
+            }
         }
     }
 
-    $processes = Get-Process -Name $EchoProcessName -ErrorAction SilentlyContinue
-    $runningCount = if ($processes) { @($processes).Count } else { 0 }
-    
-    $MenuItemStatus.Text = "Active: $runningCount / $($config.amountOfInstances)"
+    # --- SPAWNING LOGIC ---
+    if (-not $config.pauseSpawning) {
+        $needed = $config.amountOfInstances - $runningCount
 
-    $needed = $config.amountOfInstances - $runningCount
-
-    if ($needed -gt 0) {
-        for ($i = 0; $i -lt $needed; $i++) {
-            Start-Process -FilePath $EchoExePath -ArgumentList $currentFlags -WindowStyle Minimized
-            Start-Sleep -Milliseconds 1000
+        if ($needed -gt 0) {
+            $currentFlags = "-numtaskthreads $($config.numTaskThreads) -timestep $($config.timeStep) $($config.additionalArgs)"
+            for ($i = 0; $i -lt $needed; $i++) {
+                Start-Process -FilePath $EchoExePath -ArgumentList $currentFlags -WindowStyle Minimized
+                Start-Sleep -Milliseconds 1000
+            }
         }
     }
 }
@@ -612,24 +694,18 @@ Function Test-ForUpdates {
     if (-not $config.autoUpdate) { return }
 
     $url = "https://api.github.com/repos/$($Global:GithubOwner)/$($Global:GithubRepo)/releases/latest"
-    
-    # DETERMINE TARGET FILE BASED ON EXECUTION MODE
     $TargetFileName = if ($Global:IsBinary) { "EchoVR-Server-Monitor.exe" } else { "EchoVR-Server-Monitor.ps1" }
     
     try {
         $response = Invoke-RestMethod -Uri $url -Method Get -ErrorAction Stop
-        
-        # 1. Check if release contains our target asset
         $targetAsset = $response.assets | Where-Object { $_.name -eq $TargetFileName } | Select-Object -First 1
 
         if (-not $targetAsset) { return }
 
-        # 2. Version Check
         $latestTag = $response.tag_name -replace "^v", ""
         $currentVer = $Global:Version -replace "^v", ""
         
         if ([System.Version]$latestTag -gt [System.Version]$currentVer) {
-            # Update detected
             Invoke-Update -downloadUrl $targetAsset.browser_download_url
         }
     } catch {
@@ -639,7 +715,6 @@ Function Test-ForUpdates {
 
 Function Invoke-Update ($downloadUrl) {
     try {
-        # Determine Current File to replace and New File Name
         $currentFile = $Global:ExecutionPath
         $currentDir = [System.IO.Path]::GetDirectoryName($currentFile)
         
@@ -650,16 +725,12 @@ Function Invoke-Update ($downloadUrl) {
         if (-not (Test-Path $dashboardDir)) { New-Item -ItemType Directory -Path $dashboardDir -Force | Out-Null }
         $batchPath = Join-Path $dashboardDir "updater.bat"
 
-        # 1. Download
         [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $downloadUrl -OutFile $newFilePath
 
-        # 2. Build Batch Command based on mode
         $startCommand = if ($Global:IsBinary) { 
-            # Binary restart command
             "start `"`" `"$currentFile`"" 
         } else { 
-            # Script restart command (Force pwsh)
             "start `"`" pwsh -WindowStyle Hidden -File `"$currentFile`"" 
         }
 
@@ -675,7 +746,6 @@ del "%~f0"
 "@
         Set-Content -Path $batchPath -Value $batchContent
 
-        # 3. Execute
         Start-Process -FilePath $batchPath -WindowStyle Hidden
         $NotifyIcon.Visible = $false
         [System.Windows.Forms.Application]::Exit()
