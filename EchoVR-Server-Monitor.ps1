@@ -5,6 +5,7 @@
 ###################################################################
 
 # Changes 
+# v2.1.1 - Auto-cleanup of setup_tracker.ps1 after installation.
 # v2.1.0 - Fixed python & library auto-install when downloading stat tracker (uses v-env).
 # v2.0.0 - Added Stat Tracker integration. Moved Startup/AutoUpdate options to Config GUI.
 # v1.1.1 - Added Restore Defaults button, single link code enforcement, Discord redirect on link code.
@@ -13,7 +14,7 @@
 # ==============================================================================
 # GLOBAL SETTINGS
 # ==============================================================================
-$Global:Version = "2.1.0"
+$Global:Version = "2.1.1"
 $Global:GithubOwner = "EchoTools"
 $Global:GithubRepo  = "EchoVR-Windows-Hosts-Resources"
 $Global:NotifiedPids = @{}
@@ -543,7 +544,8 @@ exit
                     $setupFile = Join-Path $ScriptRoot "setup_tracker.ps1"
                     Set-Content -Path $setupFile -Value $setupScriptBlock
                     
-                    Start-Process -FilePath "pwsh" -ArgumentList "-Command & '$setupFile'"
+                    # Chain the execution with a file deletion command so the temp file is removed after the window closes
+                    Start-Process -FilePath "pwsh" -ArgumentList "-Command & '$setupFile'; Remove-Item '$setupFile' -Force"
                 }
             }
         }
@@ -927,5 +929,4 @@ del "%~f0"
 Test-ForUpdates
 
 $MonitorTimer.Start()
-
 [System.Windows.Forms.Application]::Run()
