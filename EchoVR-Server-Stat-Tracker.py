@@ -19,7 +19,7 @@ import matplotlib.gridspec as gridspec
 
 # --- Configuration & Constants ---
 CURRENT_VERSION = "2.0.0"
-CTK_THEME = "light-blue"
+CTK_THEME = "dark-blue"
 REPO_OWNER = "EchoTools"
 REPO_NAME = "EchoVR-Windows-Hosts-Resources"
 ctk.set_appearance_mode("Dark")
@@ -677,4 +677,5 @@ del "%~f0"
 
 if __name__ == "__main__":
     app = StatTrackerApp()
+
     app.mainloop()
