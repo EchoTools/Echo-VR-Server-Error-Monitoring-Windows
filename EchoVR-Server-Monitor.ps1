@@ -5,16 +5,18 @@
 ###################################################################
 
 # Changes 
+# v1.1.1 - Added Restore Defaults button, single link code enforcement, Discord redirect on link code, slightly increased spawn delay.
 # v1.1.0 - Removed PS7 dialogue (auto install). Added pause spawning option, instance uptime tracking, unlinked session detection.
 # v1.0.0 - Initial general release
 
 # ==============================================================================
 # GLOBAL SETTINGS
 # ==============================================================================
-$Global:Version = "1.1.0"
+$Global:Version = "1.1.1"
 $Global:GithubOwner = "EchoTools"
 $Global:GithubRepo  = "EchoVR-Windows-Hosts-Resources"
 $Global:NotifiedPids = @{}
+$Global:LinkCodeActive = $false
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
@@ -96,7 +98,7 @@ $ShortcutPath = Join-Path $StartupFolder "EchoVR Server Monitor.lnk"
 # ==============================================================================
 
 if (-not (Test-Path $EchoExePath)) {
-    [System.Windows.Forms.MessageBox]::Show("Error: 'bin\win10\echovr.exe' not found.`nPlace this program in the root ready-at-dawn-echo-arena folder.", "Fatal Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    [System.Windows.Forms.MessageBox]::Show("Place this program in the root ready-at-dawn-echo-arena folder.", "Fatal Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
     Exit
 }
 
@@ -372,10 +374,12 @@ Function Show-ConfigWindow {
     $form.Controls.Add($btnOpenNet)
 
     $y += 40
-
+    
+    # Save Button
     $btnSave = New-Object System.Windows.Forms.Button
     $btnSave.Text = "Save"
-    $btnSave.Location = New-Object System.Drawing.Point(125, $y)
+    $btnSave.Location = New-Object System.Drawing.Point(70, $y)
+    $btnSave.Size = New-Object System.Drawing.Size(80, 25)
     $btnSave.Add_Click({
         if ([int]$txtInst.Text -lt 1) {
             [System.Windows.Forms.MessageBox]::Show("Number of instances must be at least 1.", "Input Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
@@ -387,9 +391,28 @@ Function Show-ConfigWindow {
     })
     $form.Controls.Add($btnSave)
 
+    # Restore Defaults Button
+    $btnRestore = New-Object System.Windows.Forms.Button
+    $btnRestore.Text = "Defaults"
+    $btnRestore.Location = New-Object System.Drawing.Point(165, $y)
+    $btnRestore.Size = New-Object System.Drawing.Size(80, 25)
+    $btnRestore.Add_Click({
+        # Reset UI to default values without saving yet
+        $txtInst.Text = "1"
+        $txtExit.Text = "2000"
+        $txtCheck.Text = "5000"
+        $txtKill.Text = "20000"
+        $txtThreads.Text = "2"
+        $rbStd.Checked = $true
+        $txtArgs.Text = "-server -headless -noovr -fixedtimestep -nosymbollookup"
+    })
+    $form.Controls.Add($btnRestore)
+
+    # Cancel Button
     $btnCancel = New-Object System.Windows.Forms.Button
     $btnCancel.Text = "Discard"
-    $btnCancel.Location = New-Object System.Drawing.Point(210, $y)
+    $btnCancel.Location = New-Object System.Drawing.Point(260, $y)
+    $btnCancel.Size = New-Object System.Drawing.Size(80, 25)
     $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     $form.Controls.Add($btnCancel)
 
@@ -490,6 +513,10 @@ $MenuItemPause.Add_Click({
     $conf = Get-MonitorConfig
     $conf.pauseSpawning = $MenuItemPause.Checked
     Save-MonitorConfig $conf
+    # Reset Link Code global if we unpause manually
+    if (-not $conf.pauseSpawning) {
+        $Global:LinkCodeActive = $false
+    }
 })
 $ContextMenuStrip.Items.Add($MenuItemPause) | Out-Null
 
@@ -577,6 +604,7 @@ Function Test-LogErrors ($procId) {
 # 3. LINK CODE CHECK
 Function Test-LinkCode ($procId) {
     if ($Global:NotifiedPids.ContainsKey($procId)) { return }
+    if ($Global:LinkCodeActive) { return } # Prevent multiple popups
 
     # Find the log file
     $logFile = Get-ChildItem -Path $LogPath -Filter "*_${procId}.log" -ErrorAction SilentlyContinue | 
@@ -595,12 +623,22 @@ Function Test-LinkCode ($procId) {
             
             if (-not [string]::IsNullOrWhiteSpace($code)) {
                 $Global:NotifiedPids[$procId] = $true
+                $Global:LinkCodeActive = $true
+                
+                # Halt spawning immediately to protect validity of code
+                $conf = Get-MonitorConfig
+                $conf.pauseSpawning = $true
+                Save-MonitorConfig $conf
                 
                 # Using Start-Process to ensure the popup is visible over the game
-                $msgBody = "Your link code is: $code`n`n1. Go to #command-central in the Echo VR Lounge`n2. Click [Link EchoVRCE] and enter your code"
+                $msgBody = "Your link code is: $code`n`nClick OK to open command central.`nClick Link EchoVRCE and enter your code.`n`nUnpause server spawning in the system tray after linking."
                 $msgTitle = "Link Code Detected"
+                $discordUrl = "discord://https://discord.com/channels/779349159852769310/1227795372244729926/1355176306484056084"
                 
-                $cmd = "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('$msgBody', '$msgTitle', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)"
+                $cmd = "Add-Type -AssemblyName System.Windows.Forms; " +
+                       "`$res = [System.Windows.Forms.MessageBox]::Show('$msgBody', '$msgTitle', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information); " +
+                       "if (`$res -eq [System.Windows.Forms.DialogResult]::OK) { Start-Process '$discordUrl' }"
+                
                 $bytes = [System.Text.Encoding]::Unicode.GetBytes($cmd)
                 $encodedCommand = [Convert]::ToBase64String($bytes)
                 
@@ -614,6 +652,11 @@ Function Test-LinkCode ($procId) {
 $MonitorAction = {
     $config = Get-MonitorConfig
     $MonitorTimer.Interval = $config.delayProcessCheck
+
+    # Update Pause Menu Item based on config read
+    if ($MenuItemPause.Checked -ne $config.pauseSpawning) {
+        $MenuItemPause.Checked = $config.pauseSpawning
+    }
 
     Clear-Jobs
 
@@ -676,8 +719,13 @@ $MonitorAction = {
         if ($needed -gt 0) {
             $currentFlags = "-numtaskthreads $($config.numTaskThreads) -timestep $($config.timeStep) $($config.additionalArgs)"
             for ($i = 0; $i -lt $needed; $i++) {
+                # If we are spawning multiple, check global pause flag between spawns in case a link code appeared
+                $freshConfig = Get-MonitorConfig
+                if ($freshConfig.pauseSpawning -or $Global:LinkCodeActive) { break }
+
                 Start-Process -FilePath $EchoExePath -ArgumentList $currentFlags -WindowStyle Minimized
-                Start-Sleep -Milliseconds 1000
+                # Increased delay to catch link codes before spawning next instance
+                Start-Sleep -Milliseconds 3000
             }
         }
     }
