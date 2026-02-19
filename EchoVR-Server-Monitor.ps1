@@ -5,13 +5,14 @@
 ###################################################################
 
 # Changes 
+# v3.1.0 - Added Open Echo Folder, Delay fields in seconds, EchoVRCE Portal button.
 # v3.0.0 - Added Port/API management, DLL updates & hash checks. Removed Stat Tracker, Logfile Error Parsing.
 # v2.1.1 - Auto-cleanup of setup_tracker.ps1 after installation.
 
 # ==============================================================================
 # GLOBAL SETTINGS
 # ==============================================================================
-$Global:Version = "3.0.0"
+$Global:Version = "3.1.0"
 $Global:GithubOwner = "EchoTools"
 $Global:GithubRepo  = "EchoVR-Windows-Hosts-Resources"
 
@@ -224,41 +225,41 @@ Function Show-ConfigWindow {
     $lblNote.AutoSize = $true
     $form.Controls.Add($lblNote)
 
-    # --- Delays ---
+    # --- Delays (Converted to Seconds for UI) ---
     $y += $pad
     $lblExit = New-Object System.Windows.Forms.Label
-    $lblExit.Text = "Delay Exiting (ms):"
+    $lblExit.Text = "Delay Exiting (sec):"
     $lblExit.Location = New-Object System.Drawing.Point(20, $y)
     $lblExit.AutoSize = $true
     $form.Controls.Add($lblExit)
 
     $txtExit = New-Object System.Windows.Forms.TextBox
     $txtExit.Location = New-Object System.Drawing.Point(250, ($y - 3))
-    $txtExit.Text = "$($monitorData.delayExiting)"
+    $txtExit.Text = "$($monitorData.delayExiting / 1000)"
     $form.Controls.Add($txtExit)
 
     $y += $pad
     $lblCheck = New-Object System.Windows.Forms.Label
-    $lblCheck.Text = "Delay Process Check (ms):"
+    $lblCheck.Text = "Delay Process Check (sec):"
     $lblCheck.Location = New-Object System.Drawing.Point(20, $y)
     $lblCheck.AutoSize = $true
     $form.Controls.Add($lblCheck)
 
     $txtCheck = New-Object System.Windows.Forms.TextBox
     $txtCheck.Location = New-Object System.Drawing.Point(250, ($y - 3))
-    $txtCheck.Text = "$($monitorData.delayProcessCheck)"
+    $txtCheck.Text = "$($monitorData.delayProcessCheck / 1000)"
     $form.Controls.Add($txtCheck)
 
     $y += $pad
     $lblKill = New-Object System.Windows.Forms.Label
-    $lblKill.Text = "Delay Kill if Stuck (ms):"
+    $lblKill.Text = "Delay Kill if Stuck (sec):"
     $lblKill.Location = New-Object System.Drawing.Point(20, $y)
     $lblKill.AutoSize = $true
     $form.Controls.Add($lblKill)
 
     $txtKill = New-Object System.Windows.Forms.TextBox
     $txtKill.Location = New-Object System.Drawing.Point(250, ($y - 3))
-    $txtKill.Text = "$($monitorData.delayKillStuck)"
+    $txtKill.Text = "$($monitorData.delayKillStuck / 1000)"
     $form.Controls.Add($txtKill)
 
     # --- Advanced Section ---
@@ -364,12 +365,20 @@ Function Show-ConfigWindow {
 
     # --- Bottom Buttons ---
     $y += 35
+
     $btnOpenLocal = New-Object System.Windows.Forms.Button
     $btnOpenLocal.Text = "Open Server Config"
     $btnOpenLocal.Location = New-Object System.Drawing.Point(20, $y)
     $btnOpenLocal.Size = New-Object System.Drawing.Size(180, 25)
     $btnOpenLocal.Add_Click({ Invoke-Item $LocalConfigPath })
     $form.Controls.Add($btnOpenLocal)
+
+    $btnOpenEcho = New-Object System.Windows.Forms.Button
+    $btnOpenEcho.Text = "Open Echo Folder"
+    $btnOpenEcho.Location = New-Object System.Drawing.Point(215, $y)
+    $btnOpenEcho.Size = New-Object System.Drawing.Size(180, 25)
+    $btnOpenEcho.Add_Click({ Invoke-Item $ScriptRoot })
+    $form.Controls.Add($btnOpenEcho)
 
     $y += 40
     
@@ -379,12 +388,22 @@ Function Show-ConfigWindow {
     $btnSave.Location = New-Object System.Drawing.Point(70, $y)
     $btnSave.Size = New-Object System.Drawing.Size(80, 25)
     $btnSave.Add_Click({
-        if ([int]$txtInst.Text -lt 1) {
-            [System.Windows.Forms.MessageBox]::Show("Number of instances must be at least 1.", "Input Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
-            $txtInst.Focus()
-        } else {
+        try {
+            if ([int]$txtInst.Text -lt 1) {
+                [System.Windows.Forms.MessageBox]::Show("Number of instances must be at least 1.", "Input Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+                $txtInst.Focus()
+                return
+            }
+            
+            # Verify the delay inputs are valid numbers before closing
+            $null = [double]$txtExit.Text
+            $null = [double]$txtCheck.Text
+            $null = [double]$txtKill.Text
+
             $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
             $form.Close()
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show("Please enter valid numbers for the delay settings.", "Input Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
         }
     })
     $form.Controls.Add($btnSave)
@@ -395,11 +414,11 @@ Function Show-ConfigWindow {
     $btnRestore.Location = New-Object System.Drawing.Point(165, $y)
     $btnRestore.Size = New-Object System.Drawing.Size(80, 25)
     $btnRestore.Add_Click({
-        # Reset UI to default values without saving yet
+        # Reset UI to default values without saving yet (Defaults presented in seconds)
         $txtInst.Text = "1"
-        $txtExit.Text = "2000"
-        $txtCheck.Text = "5000"
-        $txtKill.Text = "20000"
+        $txtExit.Text = "2"
+        $txtCheck.Text = "5"
+        $txtKill.Text = "20"
         $txtThreads.Text = "2"
         $rbStd.Checked = $true
         $txtArgs.Text = "-server -headless -noovr -fixedtimestep -nosymbollookup"
@@ -418,7 +437,7 @@ Function Show-ConfigWindow {
 
     # --- Version Label at Bottom ---
     $lblVersion = New-Object System.Windows.Forms.Label
-    $lblVersion.Text = "v$($Global:Version)"
+    $lblVersion.Text = "v$($Global:Version) - Ping @berg_ on discord for issues/feedback!"
     $lblVersion.AutoSize = $false
     $lblVersion.Size = New-Object System.Drawing.Size(435, 20) 
     $lblVersion.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
@@ -429,14 +448,14 @@ Function Show-ConfigWindow {
     $result = $form.ShowDialog()
 
     if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
-        # Validations
+        # Validations and Unit Conversion (Seconds -> Milliseconds)
         $numInst = [int]$txtInst.Text
         $tStep = if ($rbComp.Checked) { 180 } else { 120 }
         
         $monitorData.amountOfInstances = $numInst
-        $monitorData.delayExiting = [int]$txtExit.Text
-        $monitorData.delayProcessCheck = [int]$txtCheck.Text
-        $monitorData.delayKillStuck = [int]$txtKill.Text
+        $monitorData.delayExiting = [int]([double]$txtExit.Text * 1000)
+        $monitorData.delayProcessCheck = [int]([double]$txtCheck.Text * 1000)
+        $monitorData.delayKillStuck = [int]([double]$txtKill.Text * 1000)
         $monitorData.numTaskThreads = [int]$txtThreads.Text
         $monitorData.timeStep = $tStep
         $monitorData.additionalArgs = $txtArgs.Text
@@ -515,9 +534,17 @@ $MenuItemUpdate.Add_Click({
 })
 $ContextMenuStrip.Items.Add($MenuItemUpdate) | Out-Null
 
+# 5. OPEN ECHOVRCE PORTAL
+$MenuItemPortal = New-Object System.Windows.Forms.ToolStripMenuItem
+$MenuItemPortal.Text = "Open EchoVRCE Portal"
+$MenuItemPortal.Add_Click({
+    Start-Process "https://echovrce.com/portal/"
+})
+$ContextMenuStrip.Items.Add($MenuItemPortal) | Out-Null
+
 $ContextMenuStrip.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 
-# 5. PAUSE SPAWNING
+# 6. PAUSE SPAWNING
 $MenuItemPause = New-Object System.Windows.Forms.ToolStripMenuItem
 $MenuItemPause.Text = "Pause Server Spawning"
 $MenuItemPause.CheckOnClick = $true
@@ -535,7 +562,7 @@ $MenuItemPause.Add_Click({
 })
 $ContextMenuStrip.Items.Add($MenuItemPause) | Out-Null
 
-# 6. EXIT
+# 7. EXIT
 $MenuItemExit = New-Object System.Windows.Forms.ToolStripMenuItem
 $MenuItemExit.Text = "Exit"
 $MenuItemExit.Add_Click({

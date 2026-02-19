@@ -41,7 +41,7 @@ class EchoServerConfig(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("EchoVR Server Setup Tool")
-        self.geometry("490x820") # Slightly larger for CTK padding
+        self.geometry("490x820") 
         self.resizable(False, False)
         
         # State variables
@@ -50,6 +50,9 @@ class EchoServerConfig(ctk.CTk):
         
         self.patch_thread = None
         self.patch_status_text = "Patch Server"
+        
+        # Assume true to prevent UI flicker until background check completes
+        self.ps_exec_policy_bypass = True 
 
         # Initialization check
         if not os.path.exists(os.path.join(BIN_DIR, "echovr.exe")):
@@ -62,7 +65,6 @@ class EchoServerConfig(ctk.CTk):
         
         # Run startup checks
         self.startup_checks()
-        
         self.build_main_menu()
 
     def ensure_setup_exists(self):
@@ -77,7 +79,7 @@ class EchoServerConfig(ctk.CTk):
                 "checkCGNAT": "Fail",  
                 "hasUnifi": False,
                 "numInstances": "",    
-                "upperPortRange": 6793, # Default 1 server (6792-6793)
+                "upperPortRange": 6793, 
                 "chklst_privateNet": False,
                 "chklst_staticIP": False,
                 "chklst_portFwd": False,
@@ -92,7 +94,6 @@ class EchoServerConfig(ctk.CTk):
         with open(SETUP_JSON, 'r') as f:
             self.setup_data = json.load(f)
         
-        # Migration for existing users: Ensure new keys exist
         if "hasUnifi" not in self.setup_data:
             self.setup_data["hasUnifi"] = False
         if "chklst_unifiAllowP2P" not in self.setup_data:
@@ -108,10 +109,8 @@ class EchoServerConfig(ctk.CTk):
             self.setup_data["filePath"] = ROOT_DIR
             self.save_setup()
 
-        # Check: Unifi Detection (Before CGNAT)
         self.check_unifi()
 
-        # Check: Auto-detect Monitor Script OR Exe on Startup
         path_exe = os.path.join(ROOT_DIR, MONITOR_EXE)
         path_ps1 = os.path.join(ROOT_DIR, MONITOR_SCRIPT)
         
@@ -127,14 +126,34 @@ class EchoServerConfig(ctk.CTk):
             threading.Thread(target=self.run_cgnat_check, daemon=True).start()
         else:
              self.is_cgnat = (self.setup_data["checkCGNAT"] == "Pass") 
+             
+        # Check PowerShell Execution Policy in background
+        threading.Thread(target=self.check_execution_policy, daemon=True).start()
 
-    def check_unifi(self):
-        """Runs tracert to detect if the gateway is a UniFi device."""
+    def check_execution_policy(self):
+        """Silently checks if the PS Execution Policy is set to Bypass."""
         try:
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            output = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command", "Get-ExecutionPolicy"],
+                startupinfo=startupinfo, text=True, timeout=5
+            ).strip()
             
-            # Run tracert for just 1 hop
+            self.ps_exec_policy_bypass = (output.lower() == "bypass")
+            # Refresh UI seamlessly if policy is not bypass
+            if not self.ps_exec_policy_bypass:
+                self.after(0, self.refresh_checklist)
+                self.after(0, self.build_main_menu)
+                
+        except Exception as e:
+            # If the check fails for any reason, default to True so we don't break the app flow
+            self.ps_exec_policy_bypass = True
+
+    def check_unifi(self):
+        try:
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             output = subprocess.check_output("tracert -h 1 1.1.1.1", 
                                              startupinfo=startupinfo, 
                                              shell=True).decode()
@@ -146,7 +165,6 @@ class EchoServerConfig(ctk.CTk):
             
             self.save_setup()
         except Exception:
-            # If check fails, assume False
             self.setup_data["hasUnifi"] = False
             self.save_setup()
 
@@ -183,7 +201,6 @@ class EchoServerConfig(ctk.CTk):
         path_gun = os.path.join(ROOT_DIR, "combatGunPatchFiles")
 
         is_patched = True
-        
         if not os.path.exists(path_gun):
             is_patched = False
         else:
@@ -198,7 +215,7 @@ class EchoServerConfig(ctk.CTk):
     def verify_hash(self, filepath, expected_hash):
         if not os.path.exists(filepath): return False
         with open(filepath, "rb") as f:
-            file_hash = hashlib.md5(f.read()).hexdigest().upper() # Ensure uppercase for comparison
+            file_hash = hashlib.md5(f.read()).hexdigest().upper() 
         return file_hash == expected_hash.upper()
 
     # --- GUI Construction ---
@@ -219,31 +236,29 @@ class EchoServerConfig(ctk.CTk):
         self.update_patch_button() 
 
         config_text = "Config Ready" if self.setup_data["isConfigured"] else "Configure Server"
-        config_fg_color = "green" if self.setup_data["isConfigured"] else None # None uses theme default (blue)
+        config_fg_color = "green" if self.setup_data["isConfigured"] else None 
         
         self.btn_config = ctk.CTkButton(main_frame, text=config_text, fg_color=config_fg_color, command=self.action_configure_server, font=("Arial", 14), width=200, height=40)
         self.btn_config.pack(pady=10)
 
-        # Checklist Area
         self.checklist_frame = ctk.CTkFrame(main_frame)
-        # We will pack this later in refresh_checklist if needed
-        
         self.refresh_checklist() 
 
-        # "Ready to Launch" Message
-        # Check standard items + Unifi item if applicable
+        # "Ready to Launch" Message Logic
         checklist_keys = ["chklst_privateNet", "chklst_staticIP", "chklst_portFwd", "chklst_usedNewConfig", "chklst_hasMonitorScript"]
         if self.setup_data.get("hasUnifi", False):
             checklist_keys.append("chklst_unifiAllowP2P")
+            
+        # Dynamically demand exec policy update if they have the script and no bypass
+        if os.path.exists(os.path.join(ROOT_DIR, MONITOR_SCRIPT)) and not getattr(self, 'ps_exec_policy_bypass', True):
+            checklist_keys.append("chklst_updateExecPolicy")
 
         all_checklist_complete = all(self.setup_data.get(k, False) for k in checklist_keys)
 
         if self.setup_data["isConfigured"] and self.setup_data["isPatched"] and all_checklist_complete:
-            
             lbl_ready = ctk.CTkLabel(main_frame, text="Ready to Launch", font=("Arial", 20, "bold"), text_color="green")
             lbl_ready.pack(pady=(20, 5))
             
-            # Launch Button
             btn_launch = ctk.CTkButton(main_frame, text="Launch Server Monitor", 
                                    command=self.action_launch_monitor, 
                                    fg_color="green", text_color="white", font=("Arial", 14), height=40)
@@ -260,23 +275,26 @@ class EchoServerConfig(ctk.CTk):
         if self.setup_data["isPatched"]:
             self.btn_patch.configure(text="Server Patched", fg_color="green", state="normal")
         else:
-            self.btn_patch.configure(text="Patch Server", fg_color=["#3B8ED0", "#1F6AA5"], state="normal") # Reset to default blue
+            self.btn_patch.configure(text="Patch Server", fg_color=["#3B8ED0", "#1F6AA5"], state="normal") 
 
     def refresh_checklist(self):
-        # Base Checklist
         checklist_items_map = [
             ("chklst_privateNet", "Set Network Profile to Private"),
             ("chklst_staticIP", "Create a Static LAN IP for This Machine"),
             ("chklst_portFwd", f"Forward Ports 6792-{self.setup_data.get('upperPortRange', 6793)} (TCP + UDP)")
         ]
 
-        # Insert Unifi Item if applicable
         if self.setup_data.get("hasUnifi", False):
             checklist_items_map.append(("chklst_unifiAllowP2P", "Allow P2P traffic to reach your server"))
 
-        # Append remaining items
         checklist_items_map.append(("chklst_usedNewConfig", "Log In with New Client Config"))
         checklist_items_map.append(("chklst_hasMonitorScript", "Download Server Monitoring Script"))
+
+        # Inject Exec Policy check if they have the .ps1 file but no bypass permission
+        if os.path.exists(os.path.join(ROOT_DIR, MONITOR_SCRIPT)) and not getattr(self, 'ps_exec_policy_bypass', True):
+            checklist_items_map.append(("chklst_updateExecPolicy", "Allow PowerShell Scripts to Run"))
+            if "chklst_updateExecPolicy" not in self.setup_data:
+                self.setup_data["chklst_updateExecPolicy"] = False
 
         all_complete = all(self.setup_data.get(k, False) for k, v in checklist_items_map)
         
@@ -286,11 +304,9 @@ class EchoServerConfig(ctk.CTk):
 
         self.checklist_frame.pack(fill="x", pady=20, padx=10)
         
-        # Clear children
         for widget in self.checklist_frame.winfo_children():
             widget.destroy()
 
-        # Title for checklist frame (mimicking LabelFrame)
         lbl_title = ctk.CTkLabel(self.checklist_frame, text="Setup Checklist", font=("Arial", 14, "bold"))
         lbl_title.pack(anchor="w", padx=10, pady=(10,5))
 
@@ -303,51 +319,33 @@ class EchoServerConfig(ctk.CTk):
                 lbl.pack(side="left", fill="x", expand=True, padx=5)
                 
                 state = "normal"
-                
-                if key == "chklst_portFwd" and not self.setup_data["isConfigured"]:
+                if key in ["chklst_portFwd", "chklst_usedNewConfig", "chklst_unifiAllowP2P"] and not self.setup_data["isConfigured"]:
                     state = "disabled"
                 
-                if key == "chklst_usedNewConfig" and not self.setup_data["isConfigured"]:
-                    state = "disabled"
-
-                if key == "chklst_unifiAllowP2P" and not self.setup_data["isConfigured"]:
-                     # Optional: Lock this until port forward logic is done? 
-                     # Instructions say "Add after port forward". 
-                     pass
-                
-                # Monitor script: Split Download buttons
                 if key == "chklst_hasMonitorScript":
                     btn_dl_frame = ctk.CTkFrame(row, fg_color="transparent")
                     btn_dl_frame.pack(side="right")
                     
                     ctk.CTkButton(btn_dl_frame, text="Download .exe", width=80,
                              command=lambda: self.download_monitor_file(MONITOR_EXE)).pack(side="left", padx=2)
-                    
                     ctk.CTkButton(btn_dl_frame, text="Download .ps1", width=80,
                              command=lambda: self.download_monitor_file(MONITOR_SCRIPT)).pack(side="left", padx=2)
+                elif key == "chklst_updateExecPolicy":
+                    btn = ctk.CTkButton(row, text="Allow", width=60, command=self.action_update_exec_policy)
+                    btn.pack(side="right", padx=5)
                 else:
                     btn = ctk.CTkButton(row, text="Done", width=60, state=state, command=lambda k=key: self.complete_checklist_item(k))
                     btn.pack(side="right", padx=5)
 
                 # --- Checklist Notes ---
                 note_text = ""
-                if key == "chklst_privateNet":
-                    note_text = "Settings > Network & Internet > Properties > Private Network"
-
-                if key == "chklst_staticIP":
-                    note_text = "e.g., 192.168.1.100. Reconnect before continuing."
-                
-                if key == "chklst_portFwd":
-                    note_text = "Complete your server configuration first."
-
-                if key == "chklst_unifiAllowP2P":
-                     note_text = "Ensure P2P traffic to your server is unblocked in the UniFi dashboard."
-
-                if key == "chklst_usedNewConfig":
-                    note_text = "Do this with the device you usually play on. (Config > Generate Client Config)"
-                
-                if key == "chklst_hasMonitorScript":
-                    note_text = "Downloads the Server Monitor to your echo folder."
+                if key == "chklst_privateNet": note_text = "Settings > Network & Internet > Properties > Private Network"
+                if key == "chklst_staticIP": note_text = "e.g., 192.168.1.100. Reconnect before continuing."
+                if key == "chklst_portFwd": note_text = "Complete your server configuration first."
+                if key == "chklst_unifiAllowP2P": note_text = "Ensure P2P traffic to your server is unblocked in the UniFi dashboard."
+                if key == "chklst_usedNewConfig": note_text = "Do this with the device you usually play on. (Config > Generate Client Config)"
+                if key == "chklst_hasMonitorScript": note_text = "Downloads the Server Monitor to your echo folder."
+                if key == "chklst_updateExecPolicy": note_text = "Required to run the .ps1 script. Will prompt for Administrator."
 
                 if note_text:
                     note_lbl = ctk.CTkLabel(self.checklist_frame, text=note_text,
@@ -362,19 +360,48 @@ class EchoServerConfig(ctk.CTk):
 
     # --- Actions ---
     
+    def action_update_exec_policy(self):
+        """Creates a self-deleting batch file that requests UAC and sets the PS policy."""
+        bat_path = os.path.join(ROOT_DIR, "Set-ExecPolicy.bat")
+        
+        # Batch script that attempts UAC elevation, sets policy, and deletes itself
+        bat_content = """@echo off
+net session >nul 2>&1
+if %errorLevel% neq 0 (
+    echo Requesting administrative privileges...
+    powershell -Command "Start-Process -Wait -Verb RunAs -FilePath '%~f0'"
+    exit /b
+)
+powershell -NoProfile -Command "Set-ExecutionPolicy Bypass -Scope LocalMachine -Force"
+del "%~f0"
+"""
+        try:
+            with open(bat_path, "w") as f:
+                f.write(bat_content)
+                
+            os.startfile(bat_path)
+            
+            # Assume successful elevation and execution
+            self.ps_exec_policy_bypass = True
+            if "chklst_updateExecPolicy" in self.setup_data:
+                self.setup_data["chklst_updateExecPolicy"] = True
+                self.save_setup()
+                
+            self.refresh_checklist()
+            self.build_main_menu()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not run policy update script: {e}")
+
     def download_monitor_file(self, filename):
             try:
                 target_path = os.path.join(ROOT_DIR, filename)
-                
-                # 1. Get the latest release info from GitHub API
                 print(f"Checking for updates at: {GITHUB_API_LATEST}")
                 with urllib.request.urlopen(GITHUB_API_LATEST, timeout=5) as response:
                     data = json.loads(response.read().decode())
                     
-                # 2. Find the asset with the correct name
                 download_url = None
                 for asset in data.get("assets", []):
-                    # We look for the asset that matches the requested filename
                     if asset["name"].lower() == filename.lower():
                         download_url = asset["browser_download_url"]
                         break
@@ -383,19 +410,22 @@ class EchoServerConfig(ctk.CTk):
                     messagebox.showerror("Error", f"Could not find '{filename}' in the latest GitHub release.")
                     return
 
-                # 3. Download the file
                 opener = urllib.request.build_opener()
                 opener.addheaders = [('User-agent', 'Mozilla/5.0')]
                 urllib.request.install_opener(opener)
-                
                 urllib.request.urlretrieve(download_url, target_path)
                 
                 if os.path.exists(target_path):
                     messagebox.showinfo("Success", f"Downloaded {filename} successfully!")
                     self.setup_data["chklst_hasMonitorScript"] = True
                     self.save_setup()
-                    self.refresh_checklist()
-                    self.build_main_menu()
+                    
+                    # If they downloaded the .ps1 and policy isn't bypassed, trigger the UAC prompt immediately
+                    if filename == MONITOR_SCRIPT and not getattr(self, 'ps_exec_policy_bypass', True):
+                        self.action_update_exec_policy()
+                    else:
+                        self.refresh_checklist()
+                        self.build_main_menu()
                 else:
                     messagebox.showerror("Error", "Download appeared to finish but file is missing.")
                     
@@ -408,56 +438,44 @@ class EchoServerConfig(ctk.CTk):
         path_exe = os.path.join(ROOT_DIR, MONITOR_EXE)
         path_ps1 = os.path.join(ROOT_DIR, MONITOR_SCRIPT)
 
-        # Prioritize EXE if both exist, otherwise check PS1
         if os.path.exists(path_exe):
             try:
                 os.startfile(path_exe)
-                self.destroy() # Close Setup Tool
+                self.destroy() 
             except Exception as e:
                 messagebox.showerror("Error", f"Could not launch .exe monitor: {e}")
 
         elif os.path.exists(path_ps1):
             try:
-                # Create the batch file to launch PS1 hidden
                 bat_filename = "Launch-Monitor.bat"
                 bat_path = os.path.join(ROOT_DIR, bat_filename)
                 
                 cmd_content = f"start /min pwsh -windowstyle hidden -file {MONITOR_SCRIPT}"
-                
                 with open(bat_path, "w") as f:
                     f.write(cmd_content)
                 
-                # Run the batch file
                 os.startfile(bat_path)
-                self.destroy() # Close Setup Tool
+                self.destroy() 
             except Exception as e:
                 messagebox.showerror("Error", f"Could not launch .ps1 monitor: {e}")
         else:
             messagebox.showerror("Error", "Monitor executable or script not found.")
 
     def action_patch_server(self):
-        # Disable button and start thread
         self.btn_patch.configure(state="disabled")
         self.patch_thread = threading.Thread(target=self.run_patch_sequence, daemon=True)
         self.patch_thread.start()
 
     def run_patch_sequence(self):
-        """Replicates patch logic with new individual file downloads."""
         try:
-            # Step 1: Download DLLs and GunPatch
             self.update_btn_text("Downloading DLLs...")
-            
             temp_dir = os.path.join(DASHBOARD_DIR, "temp")
             if not os.path.exists(temp_dir): os.makedirs(temp_dir)
             
-            # Download dbgcore.dll
             urllib.request.urlretrieve(URL_DBGCORE, os.path.join(BIN_DIR, "dbgcore.dll"))
-            
-            # Download pnsradgameserver.dll
             urllib.request.urlretrieve(URL_PNSRAD, os.path.join(BIN_DIR, "pnsradgameserver.dll"))
             
             self.update_btn_text("Downloading Patch...")
-            # Download gunpatch.zip
             gunpatch_zip_path = os.path.join(temp_dir, "gunpatch.zip")
             urllib.request.urlretrieve(URL_GUNPATCH, gunpatch_zip_path)
             
@@ -466,32 +484,23 @@ class EchoServerConfig(ctk.CTk):
                  with zipfile.ZipFile(gunpatch_zip_path, 'r') as zip_ref:
                     zip_ref.extractall(ROOT_DIR)
 
-            # Step 2: Native Patch Logic
             self.update_btn_text("Getting Ready...")
-            
-            # Paths mirroring the bat file
             data_dir = os.path.join(ROOT_DIR, "_data")
             rad_base = os.path.join(data_dir, "5932408047", "rad15")
             path_win10 = os.path.join(rad_base, "win10")
             path_orig = os.path.join(rad_base, "original_files")
             
             if os.path.exists(data_dir):
-                # Backup Logic
                 if not os.path.exists(path_orig):
                     if os.path.exists(path_win10):
                         os.rename(path_win10, path_orig)
                 
-                # Cleanup Win10
-                self.update_btn_text("Getting Ready...")
                 if os.path.exists(path_win10):
                     shutil.rmtree(path_win10)
                 
-                # Create Dirs
-                self.update_btn_text("Getting Ready...")
                 os.makedirs(os.path.join(path_win10, "packages"), exist_ok=True)
                 os.makedirs(os.path.join(path_win10, "manifests"), exist_ok=True)
                 
-                # Copy Manifests/Packages
                 self.update_btn_text("Copying Files...")
                 src_manifest = os.path.join(path_orig, "manifests", "2b47aab238f60515")
                 dst_manifest = os.path.join(path_win10, "manifests", "2b47aab238f60515")
@@ -505,21 +514,14 @@ class EchoServerConfig(ctk.CTk):
                      if os.path.isdir(src_pkg): shutil.copytree(src_pkg, dst_pkg)
                      else: shutil.copy(src_pkg, dst_pkg)
 
-                # Execute Tool
                 self.update_btn_text("Patching...")
-                
                 tool_path = os.path.join(ROOT_DIR, "evrFileTools.exe")
                 args = [
-                    tool_path,
-                    "-mode", "replace",
-                    "-packageName", "48037dc70b0ecab2",
-                    "-dataDir", path_orig + "\\",   
-                    "-inputDir", os.path.join(ROOT_DIR, "combatGunPatchFiles"),
-                    "-outputDir", path_win10 + "\\",
-                    "-ignoreOutputRestrictions"
+                    tool_path, "-mode", "replace", "-packageName", "48037dc70b0ecab2",
+                    "-dataDir", path_orig + "\\", "-inputDir", os.path.join(ROOT_DIR, "combatGunPatchFiles"),
+                    "-outputDir", path_win10 + "\\", "-ignoreOutputRestrictions"
                 ]
                 
-                # Run invisible
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 subprocess.call(args, startupinfo=startupinfo)
@@ -528,18 +530,12 @@ class EchoServerConfig(ctk.CTk):
                 messagebox.showerror("Error", "Missing _data folder. Ensure you are in the correct directory.")
 
             self.update_btn_text("Cleaning Up...")
-            
-            # Final Check
-            self.after(500, self.finish_patching) # Schedule the GUI update on main thread
+            self.after(500, self.finish_patching) 
 
-            # Cleanup temp directory
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir)
-            
-            # Cleanup patch tools
             if os.path.exists(os.path.join(ROOT_DIR, "patch.bat")):
                 os.remove(os.path.join(ROOT_DIR, "patch.bat"))
-    
             if os.path.exists(os.path.join(ROOT_DIR, "evrFileTools.exe")):
                 os.remove(os.path.join(ROOT_DIR, "evrFileTools.exe"))
             
@@ -549,11 +545,9 @@ class EchoServerConfig(ctk.CTk):
 
     def update_btn_text(self, text):
         self.patch_status_text = text
-
         def _update():
             if hasattr(self, 'btn_patch') and self.btn_patch.winfo_exists():
                 self.btn_patch.configure(text=text)
-        
         self.after(0, _update)
 
     def finish_patching(self):
@@ -563,17 +557,14 @@ class EchoServerConfig(ctk.CTk):
 
         if is_success:
             messagebox.showinfo("Success", "Server Patched Successfully!")
-            if on_main_menu:
-                self.build_main_menu()
+            if on_main_menu: self.build_main_menu()
         else:
             messagebox.showerror("Failed", "Patch verification failed.")
-            if on_main_menu:
-                self.update_patch_button()
+            if on_main_menu: self.update_patch_button()
 
     def action_configure_server(self):
         self.clear_window()
         
-        # Load existing
         existing_conf = {}
         discord_id = ""
         password = ""
@@ -591,18 +582,12 @@ class EchoServerConfig(ctk.CTk):
                         params = query.split("&")
                         remaining_params = []
                         for p in params:
-                            if p.startswith("discordid="):
-                                discord_id = p.split("=", 1)[1]
-                            elif p.startswith("password="):
-                                password = p.split("=", 1)[1]
-                            elif p.startswith("regions="):
-                                region_val = p.split("=", 1)[1]
-                            elif p.startswith("serveraddr="):
-                                cgnat_val = p.split("=", 1)[1]
-                            else:
-                                remaining_params.append(p)
-                        if remaining_params:
-                            args_val = "&" + "&".join(remaining_params)
+                            if p.startswith("discordid="): discord_id = p.split("=", 1)[1]
+                            elif p.startswith("password="): password = p.split("=", 1)[1]
+                            elif p.startswith("regions="): region_val = p.split("=", 1)[1]
+                            elif p.startswith("serveraddr="): cgnat_val = p.split("=", 1)[1]
+                            else: remaining_params.append(p)
+                        if remaining_params: args_val = "&" + "&".join(remaining_params)
                 except: pass
 
         form_frame = ctk.CTkFrame(self)
@@ -650,7 +635,6 @@ class EchoServerConfig(ctk.CTk):
         if saved_instances == "": saved_instances = 0
         var_instances = tk.IntVar(value=int(saved_instances))
         
-        # Note: CustomTkinter does not have a native Spinbox, utilizing TK Spinbox with styling
         spin_instances = tk.Spinbox(form_frame, from_=0, to=100, textvariable=var_instances, 
                                     bg="#343638", fg="white", buttonbackground="#2B2B2B")
         spin_instances.pack(anchor="w", pady=2)
@@ -687,7 +671,6 @@ class EchoServerConfig(ctk.CTk):
             if not os.path.exists(os.path.dirname(CONFIG_LOCAL)): os.makedirs(os.path.dirname(CONFIG_LOCAL))
             with open(CONFIG_LOCAL, 'w') as f: json.dump(new_config, f, indent=4)
 
-            # Check 1: Port Forward Reset Logic
             current_instances = self.setup_data.get("numInstances", 0)
             if current_instances == "": current_instances = 0
             current_instances = int(current_instances)
@@ -695,10 +678,6 @@ class EchoServerConfig(ctk.CTk):
             if current_instances != var_instances.get():
                 self.setup_data["chklst_portFwd"] = False 
 
-            # Update Port Forwarding Math:
-            # 2 Ports per server (Game + HTTP)
-            # Start: 6792
-            # End: 6792 + (Instances * 2) - 1
             num_instances = var_instances.get()
             upper_port = 6792 + (num_instances * 2) - 1
             
@@ -724,7 +703,6 @@ class EchoServerConfig(ctk.CTk):
 
         ctk.CTkButton(btn_frame, text="Generate Client Config", command=generate_client).pack(fill="x", pady=5)
         
-        # Footer buttons
         footer = ctk.CTkFrame(btn_frame, fg_color="transparent")
         footer.pack(fill="x", pady=5)
         ctk.CTkButton(footer, text="Save & Return", fg_color="green", command=save_and_return).pack(side="left", expand=True, fill="x", padx=2)
