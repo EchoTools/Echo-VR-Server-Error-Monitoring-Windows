@@ -1,5 +1,5 @@
 > [!WARNING]
-> When using Tiny10/Tiny11, some installers may break.
+> When using Tiny10/Tiny11, some auto-install stuff may break.
 > <br>You may need to install [Python](https://www.python.org/downloads/release/python-31312/) (for setup) and/or [PowerShell 7](https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell-on-windows?view=powershell-7.5#msi) (for the monitor) manually.
 
 ## Setting up a new server? 
