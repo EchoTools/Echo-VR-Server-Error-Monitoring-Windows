@@ -938,7 +938,7 @@ $MonitorAction = {
                 $portPair = Get-AvailablePortPair
                 if ($null -eq $portPair) { break }
 
-                $launchArgs = "-numtaskthreads $($config.numTaskThreads) -timestep $($config.timeStep) $($config.additionalArgs) -port $($portPair.GS) -httpport $($portPair.API) -exitnoerror"
+                $launchArgs = "-numtaskthreads $($config.numTaskThreads) -timestep $($config.timeStep) $($config.additionalArgs) -port $($portPair.GS) -httpport $($portPair.API) -exitonerror"
                 
                 $newProc = Start-Process -FilePath $EchoExePath -ArgumentList $launchArgs -WindowStyle Minimized -PassThru
                 
@@ -1154,3 +1154,4 @@ if ($initConf.autoUpdate -and ((Get-Date) - [datetime]$initConf.lastUpdateCheckD
 $MonitorTimer.Start()
 
 [System.Windows.Forms.Application]::Run()
+
