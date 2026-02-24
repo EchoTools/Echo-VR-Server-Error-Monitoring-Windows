@@ -125,7 +125,7 @@ Function Get-MonitorConfig {
             delayKillStuck = 20000
             numTaskThreads = 2
             timeStep = 120
-            additionalArgs = "-server -headless -noovr -fixedtimestep -nosymbollookup -exitnoerror"
+            additionalArgs = "-server -headless -noovr -fixedtimestep -nosymbollookup"
             suppressSetupWarning = $false
             autoUpdate = $true
             updateInterval = "Daily"
@@ -593,7 +593,7 @@ Function Show-ConfigWindow {
         $txtPort.Text = "6792"
         $txtThreads.Text = "2"
         $rbStd.Checked = $true
-        $txtArgs.Text = "-server -headless -noovr -fixedtimestep -nosymbollookup -exitnoerror"
+        $txtArgs.Text = "-server -headless -noovr -fixedtimestep -nosymbollookup"
         
         $txtExit.Text = "2"
         $txtCheck.Text = "5"
@@ -938,7 +938,7 @@ $MonitorAction = {
                 $portPair = Get-AvailablePortPair
                 if ($null -eq $portPair) { break }
 
-                $launchArgs = "-numtaskthreads $($config.numTaskThreads) -timestep $($config.timeStep) $($config.additionalArgs) -port $($portPair.GS) -httpport $($portPair.API)"
+                $launchArgs = "-numtaskthreads $($config.numTaskThreads) -timestep $($config.timeStep) $($config.additionalArgs) -port $($portPair.GS) -httpport $($portPair.API) -exitnoerror"
                 
                 $newProc = Start-Process -FilePath $EchoExePath -ArgumentList $launchArgs -WindowStyle Minimized -PassThru
                 
@@ -1152,4 +1152,5 @@ if ($initConf.autoUpdate -and ((Get-Date) - [datetime]$initConf.lastUpdateCheckD
 }
 
 $MonitorTimer.Start()
+
 [System.Windows.Forms.Application]::Run()
