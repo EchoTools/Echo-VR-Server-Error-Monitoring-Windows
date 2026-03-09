@@ -5,14 +5,14 @@
 ###################################################################
 
 # Changes 
+# v4.0.2 - Added function to repair netconfig json files, should fix broadcaster init failures
 # v4.0.1 - Hotfix for incorrect launch args, removed trigger-happy stuck process kill code.
 # v4.0.0 - Revamped config, unified log/update scheduling.
-# v3.2.1 - Fixed log archiving, added 'Clean up logs now' tray button.
 
 # ==============================================================================
 # GLOBAL SETTINGS
 # ==============================================================================
-$Global:Version = "4.0.1"
+$Global:Version = "4.0.2"
 $Global:GithubOwner = "EchoTools"
 $Global:GithubRepo  = "EchoVR-Windows-Hosts-Resources"
 
@@ -108,6 +108,54 @@ if (-not (Test-Path $EchoExePath)) {
 
 if (-not (Test-Path $DashboardDir)) { New-Item -ItemType Directory -Path $DashboardDir -Force | Out-Null }
 if (-not (Test-Path $LogPathOld)) { New-Item -ItemType Directory -Path $LogPathOld -Force | Out-Null }
+
+# Fix all of the netconfig files (sets retries to 50 and cleans them up)
+Function Repair-NetConfigFiles {
+    $ConfigDir = Join-Path $ScriptRoot "sourcedb\rad15\json\r14\config"
+    $TargetFiles = @(
+        "netconfig_client.json",
+        "netconfig_dedicatedserver.json",
+        "netconfig_lanserver.json",
+        "netconfig_localserver.json"
+    )
+
+    foreach ($file in $TargetFiles) {
+        $filePath = Join-Path $ConfigDir $file
+        if (Test-Path $filePath) {
+            # Read the raw text
+            $rawContent = Get-Content $filePath -Raw
+            
+            # Regex to strip trailing commas right before a closing brace or bracket
+            $cleanedContent = $rawContent -replace '(?m),(?=\s*[\}\]])', ''
+            
+            try {
+                $jsonObj = $cleanedContent | ConvertFrom-Json
+                $needsSave = $false
+                
+                # If regex changed the file, we need to save the cleaned version
+                if ($rawContent -ne $cleanedContent) {
+                    $needsSave = $true
+                }
+                
+                # Update retries to 50
+                if ($null -ne $jsonObj.broadcaster_init -and $jsonObj.broadcaster_init.retries -ne 50) {
+                    $jsonObj.broadcaster_init.retries = 50
+                    $needsSave = $true
+                }
+                
+                if ($needsSave) {
+                    # ConvertTo-Json standardizes the output format
+                    $jsonObj | ConvertTo-Json -Depth 10 | Set-Content $filePath
+                }
+            } catch {
+                Write-Warning "Could not parse or repair $file. Ensure the file isn't corrupted."
+            }
+        }
+    }
+}
+
+# Execute the repair automatically during startup
+Repair-NetConfigFiles
 
 # ==============================================================================
 # 3. CONFIGURATION MANAGEMENT
