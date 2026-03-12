@@ -1024,7 +1024,7 @@ $MonitorAction = {
     if ($canSoftShutdown) {
         $MenuItemStatus.Text = "Active: $runningCount / $($config.amountOfInstances) (Click Instance to Queue Shutdown)"
     } else {
-        $MenuItemStatus.Text = "Active: $runningCount / $($config.amountOfInstances)"
+        $MenuItemStatus.Text = "Active: $runningCount / $($config.amountOfInstances) (Allow API Usage for Soft Shutdowns)"
     }
 
     $sepIndex = $ContextMenuStrip.Items.IndexOf($MenuItemSeparator1)
@@ -1079,6 +1079,7 @@ $MonitorAction = {
                     })
                 } else {
                     $item.CheckOnClick = $false
+                    $item.Enabled = $false
                 }
                 
                 $ContextMenuStrip.Items.Insert($pIndex, $item)
