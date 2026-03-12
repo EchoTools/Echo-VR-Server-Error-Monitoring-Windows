@@ -11,6 +11,7 @@ import shutil
 import hashlib
 import threading
 import re
+import ctypes
 
 # --- Theme Setup ---
 ctk.set_appearance_mode("Dark")
@@ -24,10 +25,11 @@ BIN_DIR = os.path.join(ROOT_DIR, "bin", "win10")
 CONFIG_LOCAL = os.path.join(ROOT_DIR, "_local", "config.json")
 
 # URLs
-URL_GUNPATCH = "https://raw.githubusercontent.com/EchoTools/EchoVR-Windows-Hosts-Resources/main/gunpatch.zip"
+URL_GUNPATCH = "https://raw.githubusercontent.com/EchoTools/EchoVR-Windows-Hosts-Resources/main/misc/gunpatch.zip"
 URL_PNSRAD = "https://raw.githubusercontent.com/EchoTools/EchoVR-Windows-Hosts-Resources/main/dll/pnsradgameserver.dll"
 URL_DBGCORE = "https://raw.githubusercontent.com/EchoTools/EchoVR-Windows-Hosts-Resources/main/dll/dbgcore.dll"
 GITHUB_API_LATEST = "https://api.github.com/repos/EchoTools/EchoVR-Windows-Hosts-Resources/releases/latest"
+URL_FONTS = "https://raw.githubusercontent.com/EchoTools/EchoVR-Windows-Hosts-Resources/main/misc/"
 
 # Monitor Filenames
 MONITOR_EXE = "EchoVR-Server-Monitor.exe"
@@ -37,9 +39,16 @@ MONITOR_SCRIPT = "EchoVR-Server-Monitor.ps1"
 HASH_DBGCORE = "7E7998C29A1E588AF659E19C3DD27265"
 HASH_PNSRAD = "67E6E9B3BE315EA784D69E5A31815B89"
 
+# Globals
+FONT_MAIN = "Neuropol X"
+
 class EchoServerConfig(ctk.CTk):
     def __init__(self):
         super().__init__()
+        
+        # Load fonts before building UI
+        self.initialize_fonts()
+        
         self.title("EchoVR Server Setup Tool")
         self.geometry("490x840") 
         self.resizable(False, False)
@@ -50,9 +59,6 @@ class EchoServerConfig(ctk.CTk):
         
         self.patch_thread = None
         self.patch_status_text = "Patch Server"
-        
-        # Assume true to prevent UI flicker until background check completes
-        self.ps_exec_policy_bypass = True 
 
         # Initialization check
         if not os.path.exists(os.path.join(BIN_DIR, "echovr.exe")):
@@ -66,6 +72,34 @@ class EchoServerConfig(ctk.CTk):
         # Run startup checks
         self.startup_checks()
         self.build_main_menu()
+
+    def initialize_fonts(self):
+        global FONT_MAIN
+        fonts_dir = os.path.join(ROOT_DIR, "content", "engine", "core", "fonts")
+        os.makedirs(fonts_dir, exist_ok=True)
+        
+        font_files = ["EchoStencil.ttf", "Neuropol-X-Rg.otf"]
+        base_url = URL_FONTS
+        fonts_loaded = True
+        
+        for font_file in font_files:
+            font_path = os.path.join(fonts_dir, font_file)
+            try:
+                if not os.path.exists(font_path):
+                    urllib.request.urlretrieve(base_url + font_file, font_path)
+                
+                # Temporarily load font into Windows GDI 
+                if os.name == 'nt':
+                    FR_PRIVATE = 0x10
+                    res = ctypes.windll.gdi32.AddFontResourceExW(font_path, FR_PRIVATE, 0)
+                    if res == 0:
+                        fonts_loaded = False
+                else:
+                    fonts_loaded = False
+            except Exception:
+                fonts_loaded = False
+                
+        FONT_MAIN = "Neuropol X" if fonts_loaded else "Arial"
 
     def ensure_setup_exists(self):
         if not os.path.exists(DASHBOARD_DIR):
@@ -129,29 +163,19 @@ class EchoServerConfig(ctk.CTk):
             threading.Thread(target=self.run_cgnat_check, daemon=True).start()
         else:
              self.is_cgnat = (self.setup_data["checkCGNAT"] == "Pass") 
-             
-        # Check PowerShell Execution Policy in background
-        threading.Thread(target=self.check_execution_policy, daemon=True).start()
 
-    def check_execution_policy(self):
-        """Silently checks if the PS Execution Policy is set to Bypass."""
+    def is_network_private(self):
+        """Silently checks if the current network profile is set to Private."""
         try:
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             output = subprocess.check_output(
-                ["powershell", "-NoProfile", "-Command", "Get-ExecutionPolicy"],
+                ["powershell", "-NoProfile", "-Command", "(Get-NetConnectionProfile).NetworkCategory"],
                 startupinfo=startupinfo, text=True, timeout=5
             ).strip()
-            
-            self.ps_exec_policy_bypass = (output.lower() == "bypass")
-            # Refresh UI seamlessly if policy is not bypass
-            if not self.ps_exec_policy_bypass:
-                self.after(0, self.refresh_checklist)
-                self.after(0, self.build_main_menu)
-                
-        except Exception as e:
-            # If the check fails for any reason, default to True so we don't break the app flow
-            self.ps_exec_policy_bypass = True
+            return output.lower() == "private"
+        except Exception:
+            return False
 
     def check_unifi(self):
         try:
@@ -237,31 +261,27 @@ class EchoServerConfig(ctk.CTk):
         checklist_keys = ["chklst_privateNet", "chklst_staticIP", "chklst_portFwd", "chklst_usedNewConfig", "chklst_hasMonitorScript"]
         if self.setup_data.get("hasUnifi", False):
             checklist_keys.append("chklst_unifiAllowP2P")
-            
-        # Dynamically demand exec policy update if they have the script and no bypass
-        if os.path.exists(os.path.join(ROOT_DIR, MONITOR_SCRIPT)) and not getattr(self, 'ps_exec_policy_bypass', True):
-            checklist_keys.append("chklst_updateExecPolicy")
 
         all_checklist_complete = all(self.setup_data.get(k, False) for k in checklist_keys)
         is_ready = self.setup_data["isConfigured"] and self.setup_data["isPatched"] and all_checklist_complete
 
         # 2. Conditionally show the warning label
         if not is_ready:
-            lbl_warning = ctk.CTkLabel(main_frame, text="Complete all actions before starting your server.", font=("Arial", 15, "bold"), text_color="#FFA500")
+            lbl_warning = ctk.CTkLabel(main_frame, text="Complete all actions before starting your server.", font=(FONT_MAIN, 12), text_color="#FFA500")
             lbl_warning.pack(pady=(10, 15))
 
         # Buttons side-by-side
         btn_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
         btn_frame.pack(pady=10)
 
-        self.btn_patch = ctk.CTkButton(btn_frame, text="Patch Server", command=self.action_patch_server, font=("Arial", 14), width=180, height=40)
+        self.btn_patch = ctk.CTkButton(btn_frame, text="Patch Server", command=self.action_patch_server, font=(FONT_MAIN, 14), width=180, height=40)
         self.btn_patch.pack(side="left", padx=10)
         self.update_patch_button() 
 
         config_text = "Config Ready" if self.setup_data["isConfigured"] else "Configure Server"
         config_fg_color = "green" if self.setup_data["isConfigured"] else None 
         
-        self.btn_config = ctk.CTkButton(btn_frame, text=config_text, fg_color=config_fg_color, command=self.action_configure_server, font=("Arial", 14), width=180, height=40)
+        self.btn_config = ctk.CTkButton(btn_frame, text=config_text, fg_color=config_fg_color, command=self.action_configure_server, font=(FONT_MAIN, 14), width=180, height=40)
         self.btn_config.pack(side="right", padx=10)
 
         self.checklist_frame = ctk.CTkFrame(main_frame)
@@ -269,15 +289,15 @@ class EchoServerConfig(ctk.CTk):
 
         # 3. Use the pre-calculated state to show the launch buttons
         if is_ready:
-            lbl_ready = ctk.CTkLabel(main_frame, text="Ready to Launch", font=("Arial", 20, "bold"), text_color="green")
+            lbl_ready = ctk.CTkLabel(main_frame, text="Ready to Launch", font=(FONT_MAIN, 20, "bold"), text_color="green")
             lbl_ready.pack(pady=(20, 5))
             
-            btn_launch = ctk.CTkButton(main_frame, text="Launch Server Monitor", 
+            btn_launch = ctk.CTkButton(main_frame, text="Start Server", 
                                    command=self.action_launch_monitor, 
-                                   fg_color="green", text_color="white", font=("Arial", 14), height=40)
+                                   fg_color="green", text_color="white", font=(FONT_MAIN, 14), height=40)
             btn_launch.pack(pady=5)
 
-            lbl_instruct = ctk.CTkLabel(main_frame, text="This will close the setup tool.", font=("Arial", 10), text_color="gray")
+            lbl_instruct = ctk.CTkLabel(main_frame, text="This will close the setup tool.", font=(FONT_MAIN, 10), text_color="gray")
             lbl_instruct.pack(pady=0)
 
     def update_patch_button(self):
@@ -286,9 +306,9 @@ class EchoServerConfig(ctk.CTk):
             return
 
         if self.setup_data["isPatched"]:
-            self.btn_patch.configure(text="Server Patched", fg_color="green", state="normal")
+            self.btn_patch.configure(text="Server Patched", fg_color="green", state="normal", font=(FONT_MAIN, 14))
         else:
-            self.btn_patch.configure(text="Patch Server", fg_color=["#3B8ED0", "#1F6AA5"], state="normal") 
+            self.btn_patch.configure(text="Patch Server", fg_color=["#3B8ED0", "#1F6AA5"], state="normal", font=(FONT_MAIN, 14)) 
 
     def refresh_checklist(self):
         lower_port = self.setup_data.get('lowerPort', 6792)
@@ -306,12 +326,6 @@ class EchoServerConfig(ctk.CTk):
         checklist_items_map.append(("chklst_usedNewConfig", "Log In with New Client Config"))
         checklist_items_map.append(("chklst_hasMonitorScript", "Download Server Monitoring Script"))
 
-        # Inject Exec Policy check if they have the .ps1 file but no bypass permission
-        if os.path.exists(os.path.join(ROOT_DIR, MONITOR_SCRIPT)) and not getattr(self, 'ps_exec_policy_bypass', True):
-            checklist_items_map.append(("chklst_updateExecPolicy", "Allow PowerShell Scripts to Run"))
-            if "chklst_updateExecPolicy" not in self.setup_data:
-                self.setup_data["chklst_updateExecPolicy"] = False
-
         all_complete = all(self.setup_data.get(k, False) for k, v in checklist_items_map)
         
         if all_complete:
@@ -323,7 +337,7 @@ class EchoServerConfig(ctk.CTk):
         for widget in self.checklist_frame.winfo_children():
             widget.destroy()
 
-        lbl_title = ctk.CTkLabel(self.checklist_frame, text="Setup Checklist", font=("Arial", 14, "bold"))
+        lbl_title = ctk.CTkLabel(self.checklist_frame, text="Setup Checklist", font=(FONT_MAIN, 14))
         lbl_title.pack(anchor="w", padx=10, pady=(10,5))
 
         for key, label_text in checklist_items_map:
@@ -346,8 +360,8 @@ class EchoServerConfig(ctk.CTk):
                              command=lambda: self.download_monitor_file(MONITOR_EXE)).pack(side="left", padx=2)
                     ctk.CTkButton(btn_dl_frame, text="Download .ps1", width=80,
                              command=lambda: self.download_monitor_file(MONITOR_SCRIPT)).pack(side="left", padx=2)
-                elif key == "chklst_updateExecPolicy":
-                    btn = ctk.CTkButton(row, text="Allow", width=60, command=self.action_update_exec_policy)
+                elif key == "chklst_privateNet":
+                    btn = ctk.CTkButton(row, text="Set", width=60, command=self.action_set_private_network)
                     btn.pack(side="right", padx=5)
                 else:
                     btn = ctk.CTkButton(row, text="Done", width=60, state=state, command=lambda k=key: self.complete_checklist_item(k))
@@ -355,13 +369,12 @@ class EchoServerConfig(ctk.CTk):
 
                 # --- Checklist Notes ---
                 note_text = ""
-                if key == "chklst_privateNet": note_text = "Settings > Network & Internet > Properties > Private Network"
+                if key == "chklst_privateNet": note_text = 'Click "Set" to do this automatically.'
                 if key == "chklst_staticIP": note_text = "e.g., 192.168.1.100. Reconnect before continuing."
                 if key == "chklst_portFwd": note_text = "Complete your server configuration first."
                 if key == "chklst_unifiAllowP2P": note_text = "Ensure P2P traffic to your server is unblocked in the UniFi dashboard."
                 if key == "chklst_usedNewConfig": note_text = "Do this with the device you usually play on. (Config > Generate Client Config)"
-                if key == "chklst_hasMonitorScript": note_text = "Downloads the Server Monitor to your echo folder."
-                if key == "chklst_updateExecPolicy": note_text = "Required to run the .ps1 script. Will prompt for Administrator."
+                if key == "chklst_hasMonitorScript": note_text = "Downloads the Server Monitor to your echo folder.\nThe .ps1 option will auto-update execution policy."
 
                 if note_text:
                     note_lbl = ctk.CTkLabel(self.checklist_frame, text=note_text,
@@ -376,35 +389,94 @@ class EchoServerConfig(ctk.CTk):
 
     # --- Actions ---
     
-    def action_update_exec_policy(self):
-        """Creates a self-deleting batch file that requests UAC and sets the PS policy."""
-        bat_path = os.path.join(ROOT_DIR, "Set-ExecPolicy.bat")
+    def action_set_private_network(self):
+        """Creates a self-deleting batch file that requests UAC and sets network profile to Private."""
+        temp_dir = os.path.join(DASHBOARD_DIR, "temp")
+        os.makedirs(temp_dir, exist_ok=True)
+        bat_path = os.path.join(temp_dir, "Set-PrivateNetwork.bat")
         
-        # Batch script that attempts UAC elevation, sets policy, and deletes itself
         bat_content = """@echo off
 net session >nul 2>&1
 if %errorLevel% neq 0 (
-    echo Requesting administrative privileges...
-    powershell -Command "Start-Process -Wait -Verb RunAs -FilePath '%~f0'"
+    powershell -WindowStyle Hidden -Command "Start-Process -WindowStyle Hidden -Wait -Verb RunAs -FilePath '%~f0'"
     exit /b
 )
-powershell -NoProfile -Command "Set-ExecutionPolicy Bypass -Scope LocalMachine -Force"
+powershell -WindowStyle Hidden -NoProfile -Command "Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private"
 del "%~f0"
 """
         try:
             with open(bat_path, "w") as f:
                 f.write(bat_content)
                 
-            os.startfile(bat_path)
-            
-            # Assume successful elevation and execution
-            self.ps_exec_policy_bypass = True
-            if "chklst_updateExecPolicy" in self.setup_data:
-                self.setup_data["chklst_updateExecPolicy"] = True
-                self.save_setup()
+            def run_and_verify():
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 
-            self.refresh_checklist()
-            self.build_main_menu()
+                # Execute script and wait
+                subprocess.run(bat_path, startupinfo=startupinfo, shell=True)
+                
+                # Verify profile was successfully changed
+                is_private = self.is_network_private()
+                
+                # Safely update GUI
+                def update_ui():
+                    if is_private:
+                        self.setup_data["chklst_privateNet"] = True
+                        self.save_setup()
+                        self.refresh_checklist()
+                        self.build_main_menu()
+                    else:
+                        messagebox.showwarning("Incomplete", "The network profile was not updated. Did you decline the Administrator prompt?")
+                
+                self.after(0, update_ui)
+
+            threading.Thread(target=run_and_verify, daemon=True).start()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not run network profile script: {e}")
+    
+    def action_update_exec_policy(self):
+        """Creates a self-deleting batch file that requests UAC and sets the PS policy."""
+        bat_path = os.path.join(ROOT_DIR, "Set-ExecPolicy.bat")
+        
+        bat_content = """@echo off
+net session >nul 2>&1
+if %errorLevel% neq 0 (
+    powershell -WindowStyle Hidden -Command "Start-Process -WindowStyle Hidden -Wait -Verb RunAs -FilePath '%~f0'"
+    exit /b
+)
+
+:: 1. Force update for 64-bit Windows PowerShell (5.1)
+if exist "%SystemRoot%\\sysnative\\WindowsPowerShell\\v1.0\\powershell.exe" (
+    "%SystemRoot%\\sysnative\\WindowsPowerShell\\v1.0\\powershell.exe" -WindowStyle Hidden -NoProfile -Command "Set-ExecutionPolicy Bypass -Scope LocalMachine -Force"
+) else (
+    powershell -WindowStyle Hidden -NoProfile -Command "Set-ExecutionPolicy Bypass -Scope LocalMachine -Force"
+)
+
+:: 2. Update PowerShell 7 (pwsh) since the monitor actually uses it
+pwsh -WindowStyle Hidden -NoProfile -Command "Set-ExecutionPolicy Bypass -Scope LocalMachine -Force"
+
+del "%~f0"
+"""
+        try:
+            with open(bat_path, "w") as f:
+                f.write(bat_content)
+                
+            def run_and_update():
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                
+                # Execute script and wait
+                subprocess.run(bat_path, startupinfo=startupinfo, shell=True)
+                
+                # Safely update GUI
+                def update_ui():
+                    self.refresh_checklist()
+                    self.build_main_menu()
+
+                self.after(0, update_ui)
+
+            threading.Thread(target=run_and_update, daemon=True).start()
             
         except Exception as e:
             messagebox.showerror("Error", f"Could not run policy update script: {e}")
@@ -447,9 +519,7 @@ del "%~f0"
                     
                     if filename == MONITOR_SCRIPT:
                         self.check_and_install_pwsh()
-
-                    # If they downloaded the .ps1 and policy isn't bypassed, trigger the UAC prompt immediately
-                    if filename == MONITOR_SCRIPT and not getattr(self, 'ps_exec_policy_bypass', True):
+                        # Always run the policy update
                         self.action_update_exec_policy()
                     else:
                         self.refresh_checklist()
@@ -575,7 +645,7 @@ del "%~f0"
         self.patch_status_text = text
         def _update():
             if hasattr(self, 'btn_patch') and self.btn_patch.winfo_exists():
-                self.btn_patch.configure(text=text)
+                self.btn_patch.configure(text=text, font=(FONT_MAIN, 14))
         self.after(0, _update)
 
     def finish_patching(self):
@@ -623,9 +693,9 @@ del "%~f0"
         
         cgnat_status = self.setup_data.get("checkCGNAT", "Fail")
         if cgnat_status == "Pass":
-            lbl_cgnat = ctk.CTkLabel(form_frame, text="No CGNAT Detected!", text_color="green", font=("Arial", 14, "bold"))
+            lbl_cgnat = ctk.CTkLabel(form_frame, text="No CGNAT Detected!", text_color="green", font=(FONT_MAIN, 14))
         else:
-            lbl_cgnat = ctk.CTkLabel(form_frame, text="CGNAT Detected. Use a tunnel service to host.", text_color="red", font=("Arial", 14, "bold"))
+            lbl_cgnat = ctk.CTkLabel(form_frame, text="CGNAT Detected. Use a tunnel service to host.", text_color="red", font=(FONT_MAIN, 14))
         lbl_cgnat.pack(anchor="w", pady=(0, 10))
 
         ctk.CTkLabel(form_frame, text="Discord User ID (Required)").pack(anchor="w")
@@ -714,7 +784,6 @@ del "%~f0"
 
             current_lower = self.setup_data.get("lowerPort", 6792)
             
-            # Port forward needs repeating if they changed their counts or ports
             if current_instances != var_instances.get() or current_lower != var_lower.get():
                 self.setup_data["chklst_portFwd"] = False 
 
