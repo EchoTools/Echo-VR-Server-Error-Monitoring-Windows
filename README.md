@@ -1,5 +1,5 @@
 > [!WARNING]
-> When using Tiny10/Tiny11, some auto-install stuff may break.
+> When compiling the setup program on Tiny10/Tiny11, some python stuff may break.
 > See the [wiki](https://github.com/EchoTools/EchoVR-Windows-Hosts-Resources/wiki/Setup-Guide#information-for-tinyw10w11) for more information.
 
 ## Setting up a new server? 
