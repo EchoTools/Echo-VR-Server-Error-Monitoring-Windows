@@ -12,8 +12,17 @@ import hashlib
 import threading
 import re
 import ctypes
+import ssl
 
-# --- Theme Setup ---
+# SSL Fix
+try:
+    _create_unverified_https_context = ssl._create_unverified_context
+except AttributeError:
+    pass
+else:
+    ssl._create_default_https_context = _create_unverified_https_context
+
+# Theme Setup
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
