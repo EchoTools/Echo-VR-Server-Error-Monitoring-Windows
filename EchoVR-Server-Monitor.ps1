@@ -5,29 +5,34 @@
 ###################################################################
 
 # Changes 
+# v5.1.0 - Added Touch-Friendly UI option, left-click tray menu, and double-click tray for config.
 # v5.0.1 - Readded manual log archive/purge buttons that got missed during the UI update.
 # v5.0.0 - EchoVR API integration, customizable UI/Tray tags, Soft Shutdowns, and port-state persistence. Removed PS7 Requirement.
-# v4.0.3 - Added some bling to the about tab, download fonts from repo main/misc and place them in \content\engine\core\fonts\ to use them. <3
 
 # ==============================================================================
 # GLOBAL SETTINGS
 # ==============================================================================
-$Global:Version = "5.0.1"
+$Global:Version = "5.1.0"
 $Global:GithubOwner = "EchoTools"
 $Global:GithubRepo  = "EchoVR-Windows-Hosts-Resources"
 
-# Port Management & Tracking
-# Structure: @{ PID = @{ GS=1234; API=1235; LogPath="..."; ShutdownQueued=$false; PlayerCount=0; ... } }
-$Global:PortMap = @{}
+$releasesURL = "https://api.github.com/repos/$Global:GithubOwner/$Global:GithubRepo/releases/latest"
+$dllURL = "https://raw.githubusercontent.com/$Global:GithubOwner/$Global:GithubRepo/main/dll"
+$headsetLinkURL = "discord://-/channels/779349159852769310/1227795372244729926/1355176306484056084"
+$portalURL = "https://echovrce.com/"
 
 # DLL Hash Targets (MD5)
 $Global:Hash_PNSRAD = "67E6E9B3BE315EA784D69E5A31815B89"
 $Global:Hash_DBGCORE = "7E7998C29A1E588AF659E19C3DD27265"
 
+# Port Management & Instance Tracking
+# Structure: @{ PID = @{ GS=1234; API=1235; LogPath="..."; ShutdownQueued=$false; PlayerCount=0; ... } }
+$Global:PortMap = @{}
 $Global:NotifiedPids = @{}
 $Global:LinkCodeActive = $false
 $Global:LastLogMaintenanceDay = -1
 
+# Setting up system tray menu and GUI
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
@@ -182,6 +187,7 @@ Function Set-ApiAccess ($enable) {
     }
 }
 
+# Cleans the netconfig json files to allow them to actually be parsed, and sets retries to 50
 Function Repair-NetConfigFiles {
     $ConfigDir = Join-Path $ScriptRoot "sourcedb\rad15\json\r14\config"
     $TargetFiles = @("netconfig_client.json", "netconfig_dedicatedserver.json", "netconfig_lanserver.json", "netconfig_localserver.json")
@@ -230,6 +236,7 @@ Function Get-MonitorConfig {
         allowMonitorApi = $true
         titlePid = $true; titlePorts = $true; titleLobby = $true; titlePlayers = $true; titleUptime = $true
         trayPid = $true; trayPorts = $true; trayLobby = $false; trayPlayers = $true; trayUptime = $true
+        touchFriendly = $false
     }
 
     if (-not (Test-Path $MonitorFile)) {
@@ -360,19 +367,49 @@ Function Invoke-LogMaintenance {
 # 5. GUI: CONFIGURATION WINDOW
 # ==============================================================================
 
+$ContextMenuStrip = New-Object System.Windows.Forms.ContextMenuStrip
+
+Function Set-TrayStyle {
+    $conf = Get-MonitorConfig
+    if ($conf.touchFriendly) {
+        $ContextMenuStrip.Font = New-Object System.Drawing.Font("Segoe UI", 14)
+    } else {
+        $ContextMenuStrip.Font = [System.Windows.Forms.Control]::DefaultFont
+    }
+}
+Set-TrayStyle
+
 Function Show-ConfigWindow {
-    $monitorData = Get-MonitorConfig
+    if ($null -ne $Global:ConfigForm -and -not $Global:ConfigForm.IsDisposed) {
+        if ($Global:ConfigForm.WindowState -eq 'Minimized') {
+            $Global:ConfigForm.WindowState = 'Normal'
+        }
+        $Global:ConfigForm.Activate()
+        return
+    }
     
+    $monitorData = Get-MonitorConfig
+    $tf = $monitorData.touchFriendly
+    
+    $xScale = if ($tf) { 1.25 } else { 1 }
+    $yScale = if ($tf) { 1.5 } else { 1 }
+    $hScale = if ($tf) { 1.5 } else { 1 }
+
+    Function P($x, $y) { return New-Object System.Drawing.Point([int]($x * $xScale), [int]($y * $yScale)) }
+    Function S($w, $h) { return New-Object System.Drawing.Size([int]($w * $xScale), [int]($h * $hScale)) }
+
     $form = New-Object System.Windows.Forms.Form
+    $Global:ConfigForm = $form
     $form.Text = "Server Monitor Configuration"
-    $form.Size = New-Object System.Drawing.Size(460, 600)
+    $form.Size = New-Object System.Drawing.Size([int](460 * $xScale), [int](600 * $yScale))
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
     $form.MaximizeBox = $false
+    if ($tf) { $form.Font = New-Object System.Drawing.Font("Segoe UI", 11) }
 
     $tabControl = New-Object System.Windows.Forms.TabControl
-    $tabControl.Location = New-Object System.Drawing.Point(10, 10)
-    $tabControl.Size = New-Object System.Drawing.Size(425, 460)
+    $tabControl.Location = P 10 10
+    $tabControl.Size = New-Object System.Drawing.Size([int](425 * $xScale), [int](460 * $yScale))
     $form.Controls.Add($tabControl)
 
     # --- TAB 1: SERVER SETTINGS ---
@@ -380,208 +417,83 @@ Function Show-ConfigWindow {
     $tabServer.Text = "Server Settings"
     $tabControl.TabPages.Add($tabServer)
 
-    $lblInst = New-Object System.Windows.Forms.Label
-    $lblInst.Text = "Number of Instances:"
-    $lblInst.Location = New-Object System.Drawing.Point(20, 25)
-    $lblInst.AutoSize = $true
-    $tabServer.Controls.Add($lblInst)
+    $lblInst = New-Object System.Windows.Forms.Label; $lblInst.Text = "Number of Instances:"; $lblInst.Location = P 20 25; $lblInst.AutoSize = $true; $tabServer.Controls.Add($lblInst)
+    $txtInst = New-Object System.Windows.Forms.TextBox; $txtInst.Location = P 250 22; $txtInst.Size = S 120 20; $txtInst.Text = "$($monitorData.amountOfInstances)"; $tabServer.Controls.Add($txtInst)
 
-    $txtInst = New-Object System.Windows.Forms.TextBox
-    $txtInst.Location = New-Object System.Drawing.Point(250, 22)
-    $txtInst.Size = New-Object System.Drawing.Size(120, 20)
-    $txtInst.Text = "$($monitorData.amountOfInstances)"
-    $tabServer.Controls.Add($txtInst)
+    $lblPort = New-Object System.Windows.Forms.Label; $lblPort.Text = "Base Port:"; $lblPort.Location = P 20 60; $lblPort.AutoSize = $true; $tabServer.Controls.Add($lblPort)
+    $txtPort = New-Object System.Windows.Forms.TextBox; $txtPort.Location = P 250 57; $txtPort.Size = S 120 20; $txtPort.Text = "$($monitorData.basePort)"; $tabServer.Controls.Add($txtPort)
 
-    $lblPort = New-Object System.Windows.Forms.Label
-    $lblPort.Text = "Base Port:"
-    $lblPort.Location = New-Object System.Drawing.Point(20, 60)
-    $lblPort.AutoSize = $true
-    $tabServer.Controls.Add($lblPort)
+    $lblThreads = New-Object System.Windows.Forms.Label; $lblThreads.Text = "Threads per Instance:"; $lblThreads.Location = P 20 95; $lblThreads.AutoSize = $true; $tabServer.Controls.Add($lblThreads)
+    $txtThreads = New-Object System.Windows.Forms.TextBox; $txtThreads.Location = P 250 92; $txtThreads.Size = S 120 20; $txtThreads.Text = "$($monitorData.numTaskThreads)"; $tabServer.Controls.Add($txtThreads)
 
-    $txtPort = New-Object System.Windows.Forms.TextBox
-    $txtPort.Location = New-Object System.Drawing.Point(250, 57)
-    $txtPort.Size = New-Object System.Drawing.Size(120, 20)
-    $txtPort.Text = "$($monitorData.basePort)"
-    $tabServer.Controls.Add($txtPort)
+    $lblTime = New-Object System.Windows.Forms.Label; $lblTime.Text = "Server Timestep:"; $lblTime.Location = P 20 130; $lblTime.AutoSize = $true; $tabServer.Controls.Add($lblTime)
 
-    $lblThreads = New-Object System.Windows.Forms.Label
-    $lblThreads.Text = "Threads per Instance:"
-    $lblThreads.Location = New-Object System.Drawing.Point(20, 95)
-    $lblThreads.AutoSize = $true
-    $tabServer.Controls.Add($lblThreads)
-
-    $txtThreads = New-Object System.Windows.Forms.TextBox
-    $txtThreads.Location = New-Object System.Drawing.Point(250, 92)
-    $txtThreads.Size = New-Object System.Drawing.Size(120, 20)
-    $txtThreads.Text = "$($monitorData.numTaskThreads)"
-    $tabServer.Controls.Add($txtThreads)
-
-    $lblTime = New-Object System.Windows.Forms.Label
-    $lblTime.Text = "Server Timestep:"
-    $lblTime.Location = New-Object System.Drawing.Point(20, 130)
-    $lblTime.AutoSize = $true
-    $tabServer.Controls.Add($lblTime)
-
-    $rbStd = New-Object System.Windows.Forms.RadioButton
-    $rbStd.Text = "Standard (120)"
-    $rbStd.Location = New-Object System.Drawing.Point(150, 128)
-    $rbStd.AutoSize = $true
-    $tabServer.Controls.Add($rbStd)
-
-    $rbComp = New-Object System.Windows.Forms.RadioButton
-    $rbComp.Text = "Competitive (180)"
-    $rbComp.Location = New-Object System.Drawing.Point(260, 128)
-    $rbComp.AutoSize = $true
-    $tabServer.Controls.Add($rbComp)
-
+    $rbStd = New-Object System.Windows.Forms.RadioButton; $rbStd.Text = "Standard (120)"; $rbStd.Location = P 150 128; $rbStd.AutoSize = $true; $tabServer.Controls.Add($rbStd)
+    $rbComp = New-Object System.Windows.Forms.RadioButton; $rbComp.Text = "Competitive (180)"; $rbComp.Location = P 260 128; $rbComp.AutoSize = $true; $tabServer.Controls.Add($rbComp)
     if ($monitorData.timeStep -eq 180) { $rbComp.Checked = $true } else { $rbStd.Checked = $true }
 
-    $lblArgs = New-Object System.Windows.Forms.Label
-    $lblArgs.Text = "Additional Args:"
-    $lblArgs.Location = New-Object System.Drawing.Point(20, 165)
-    $lblArgs.AutoSize = $true
-    $tabServer.Controls.Add($lblArgs)
+    $lblArgs = New-Object System.Windows.Forms.Label; $lblArgs.Text = "Additional Args:"; $lblArgs.Location = P 20 165; $lblArgs.AutoSize = $true; $tabServer.Controls.Add($lblArgs)
+    $txtArgs = New-Object System.Windows.Forms.TextBox; $txtArgs.Location = P 20 185; $txtArgs.Size = S 380 20; $txtArgs.Text = "$($monitorData.additionalArgs)"; $tabServer.Controls.Add($txtArgs)
 
-    $txtArgs = New-Object System.Windows.Forms.TextBox
-    $txtArgs.Location = New-Object System.Drawing.Point(20, 185)
-    $txtArgs.Size = New-Object System.Drawing.Size(380, 20)
-    $txtArgs.Text = "$($monitorData.additionalArgs)"
-    $tabServer.Controls.Add($txtArgs)
-
-    $chkApi = New-Object System.Windows.Forms.CheckBox
-    $chkApi.Text = "Enable EchoVR API"
-    $chkApi.Location = New-Object System.Drawing.Point(20, 220)
-    $chkApi.AutoSize = $true
-    $chkApi.Checked = $monitorData.enableApi
-    $tabServer.Controls.Add($chkApi)
+    $chkApi = New-Object System.Windows.Forms.CheckBox; $chkApi.Text = "Enable EchoVR API"; $chkApi.Location = P 20 220; $chkApi.AutoSize = $true; $chkApi.Checked = $monitorData.enableApi; $tabServer.Controls.Add($chkApi)
 
     # --- TAB 2: MONITOR SETTINGS ---
     $tabMonitor = New-Object System.Windows.Forms.TabPage
     $tabMonitor.Text = "Monitor Settings"
     $tabControl.TabPages.Add($tabMonitor)
 
-    $lblCheck = New-Object System.Windows.Forms.Label
-    $lblCheck.Text = "Monitor Update Frequency (sec):"
-    $lblCheck.Location = New-Object System.Drawing.Point(20, 15)
-    $lblCheck.AutoSize = $true
-    $tabMonitor.Controls.Add($lblCheck)
+    $lblCheck = New-Object System.Windows.Forms.Label; $lblCheck.Text = "Monitor Update Frequency (sec):"; $lblCheck.Location = P 20 15; $lblCheck.AutoSize = $true; $tabMonitor.Controls.Add($lblCheck)
+    $txtCheck = New-Object System.Windows.Forms.TextBox; $txtCheck.Location = P 250 12; $txtCheck.Size = S 120 20; $txtCheck.Text = "$($monitorData.delayProcessCheck / 1000)"; $tabMonitor.Controls.Add($txtCheck)
 
-    $txtCheck = New-Object System.Windows.Forms.TextBox
-    $txtCheck.Location = New-Object System.Drawing.Point(250, 12)
-    $txtCheck.Size = New-Object System.Drawing.Size(120, 20)
-    $txtCheck.Text = "$($monitorData.delayProcessCheck / 1000)"
-    $tabMonitor.Controls.Add($txtCheck)
+    $chkStartup = New-Object System.Windows.Forms.CheckBox; $chkStartup.Text = "Start with Windows"; $chkStartup.Location = P 20 45; $chkStartup.AutoSize = $true; $chkStartup.Checked = (Test-Path $ShortcutPath); $tabMonitor.Controls.Add($chkStartup)
 
-    $chkStartup = New-Object System.Windows.Forms.CheckBox
-    $chkStartup.Text = "Start with Windows"
-    $chkStartup.Location = New-Object System.Drawing.Point(20, 45)
-    $chkStartup.AutoSize = $true
-    $chkStartup.Checked = (Test-Path $ShortcutPath)
-    $tabMonitor.Controls.Add($chkStartup)
+    $chkArchive = New-Object System.Windows.Forms.CheckBox; $chkArchive.Text = "Auto-Archive Logs"; $chkArchive.Location = P 20 75; $chkArchive.AutoSize = $true; $chkArchive.Checked = $monitorData.autoArchive; $tabMonitor.Controls.Add($chkArchive)
+    $btnArchiveNow = New-Object System.Windows.Forms.Button; $btnArchiveNow.Text = "Archive Now"; $btnArchiveNow.Location = P 250 73; $btnArchiveNow.Size = S 120 23; $tabMonitor.Controls.Add($btnArchiveNow)
+    $btnArchiveNow.Add_Click({ Invoke-LogMaintenance -ManualArchive })
 
-    $chkArchive = New-Object System.Windows.Forms.CheckBox
-    $chkArchive.Text = "Auto-Archive Logs"
-    $chkArchive.Location = New-Object System.Drawing.Point(20, 75)
-    $chkArchive.AutoSize = $true
-    $chkArchive.Checked = $monitorData.autoArchive
-    $tabMonitor.Controls.Add($chkArchive)
+    $chkPurge = New-Object System.Windows.Forms.CheckBox; $chkPurge.Text = "Purge Old Logs:"; $chkPurge.Location = P 20 105; $chkPurge.AutoSize = $true; $chkPurge.Checked = $monitorData.autoPurge; $tabMonitor.Controls.Add($chkPurge)
 
-    $btnArchiveNow = New-Object System.Windows.Forms.Button
-    $btnArchiveNow.Text = "Archive Now"
-    $btnArchiveNow.Location = New-Object System.Drawing.Point(250, 73)
-    $btnArchiveNow.Size = New-Object System.Drawing.Size(120, 23)
-    $btnArchiveNow.Add_Click({
-        Invoke-LogMaintenance -ManualArchive
-    })
-    $tabMonitor.Controls.Add($btnArchiveNow)
-
-    $chkPurge = New-Object System.Windows.Forms.CheckBox
-    $chkPurge.Text = "Purge Old Logs:"
-    $chkPurge.Location = New-Object System.Drawing.Point(20, 105)
-    $chkPurge.AutoSize = $true
-    $chkPurge.Checked = $monitorData.autoPurge
-    $tabMonitor.Controls.Add($chkPurge)
-
-    $cmbPurge = New-Object System.Windows.Forms.ComboBox
-    $cmbPurge.Location = New-Object System.Drawing.Point(135, 103)
-    $cmbPurge.Size = New-Object System.Drawing.Size(80, 20)
-    $cmbPurge.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $cmbPurge = New-Object System.Windows.Forms.ComboBox; $cmbPurge.Location = P 135 103; $cmbPurge.Size = S 80 20; $cmbPurge.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
     @("Daily", "Weekly", "Monthly") | ForEach-Object { $cmbPurge.Items.Add($_) | Out-Null }
-    $cmbPurge.SelectedItem = $monitorData.purgeInterval
-    $cmbPurge.Enabled = $chkPurge.Checked
-    $tabMonitor.Controls.Add($cmbPurge)
+    $cmbPurge.SelectedItem = $monitorData.purgeInterval; $cmbPurge.Enabled = $chkPurge.Checked; $tabMonitor.Controls.Add($cmbPurge)
     $chkPurge.Add_CheckedChanged({ $cmbPurge.Enabled = $chkPurge.Checked })
 
-    $btnPurgeNow = New-Object System.Windows.Forms.Button
-    $btnPurgeNow.Text = "Purge Now"
-    $btnPurgeNow.Location = New-Object System.Drawing.Point(250, 102)
-    $btnPurgeNow.Size = New-Object System.Drawing.Size(120, 23)
-    $btnPurgeNow.Add_Click({
-        Invoke-LogMaintenance -ManualPurge
-    })
-    $tabMonitor.Controls.Add($btnPurgeNow)
+    $btnPurgeNow = New-Object System.Windows.Forms.Button; $btnPurgeNow.Text = "Purge Now"; $btnPurgeNow.Location = P 250 102; $btnPurgeNow.Size = S 120 23; $tabMonitor.Controls.Add($btnPurgeNow)
+    $btnPurgeNow.Add_Click({ Invoke-LogMaintenance -ManualPurge })
 
-    $chkAutoUpdate = New-Object System.Windows.Forms.CheckBox
-    $chkAutoUpdate.Text = "Check Updates:"
-    $chkAutoUpdate.Location = New-Object System.Drawing.Point(20, 135)
-    $chkAutoUpdate.AutoSize = $true
-    $chkAutoUpdate.Checked = $monitorData.autoUpdate
-    $tabMonitor.Controls.Add($chkAutoUpdate)
+    $chkAutoUpdate = New-Object System.Windows.Forms.CheckBox; $chkAutoUpdate.Text = "Check Updates:"; $chkAutoUpdate.Location = P 20 135; $chkAutoUpdate.AutoSize = $true; $chkAutoUpdate.Checked = $monitorData.autoUpdate; $tabMonitor.Controls.Add($chkAutoUpdate)
 
-    $cmbUpdate = New-Object System.Windows.Forms.ComboBox
-    $cmbUpdate.Location = New-Object System.Drawing.Point(135, 133)
-    $cmbUpdate.Size = New-Object System.Drawing.Size(80, 20)
-    $cmbUpdate.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $cmbUpdate = New-Object System.Windows.Forms.ComboBox; $cmbUpdate.Location = P 135 133; $cmbUpdate.Size = S 80 20; $cmbUpdate.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
     @("Daily", "Weekly", "Monthly") | ForEach-Object { $cmbUpdate.Items.Add($_) | Out-Null }
-    $cmbUpdate.SelectedItem = $monitorData.updateInterval
-    $cmbUpdate.Enabled = $chkAutoUpdate.Checked
-    $tabMonitor.Controls.Add($cmbUpdate)
+    $cmbUpdate.SelectedItem = $monitorData.updateInterval; $cmbUpdate.Enabled = $chkAutoUpdate.Checked; $tabMonitor.Controls.Add($cmbUpdate)
     $chkAutoUpdate.Add_CheckedChanged({ $cmbUpdate.Enabled = $chkAutoUpdate.Checked })
 
-    # -- Monitor API Toggle --
-    $chkAllowMonitorApi = New-Object System.Windows.Forms.CheckBox
-    $chkAllowMonitorApi.Text = "Allow Monitor API Usage"
-    $chkAllowMonitorApi.Location = New-Object System.Drawing.Point(20, 165)
-    $chkAllowMonitorApi.AutoSize = $true
-    $chkAllowMonitorApi.Checked = $monitorData.allowMonitorApi
-    $tabMonitor.Controls.Add($chkAllowMonitorApi)
+    $chkAllowMonitorApi = New-Object System.Windows.Forms.CheckBox; $chkAllowMonitorApi.Text = "Allow Monitor API Usage"; $chkAllowMonitorApi.Location = P 20 165; $chkAllowMonitorApi.AutoSize = $true; $chkAllowMonitorApi.Checked = $monitorData.allowMonitorApi; $tabMonitor.Controls.Add($chkAllowMonitorApi)
 
-    # -- Telemetry Settings --
-    $lblTelemetry = New-Object System.Windows.Forms.Label
-    $lblTelemetry.Text = "Telemetry Visibility:"
-    $lblTelemetry.Font = New-Object System.Drawing.Font("Arial", 8, [System.Drawing.FontStyle]::Bold)
-    $lblTelemetry.Location = New-Object System.Drawing.Point(20, 195)
-    $lblTelemetry.AutoSize = $true
-    $tabMonitor.Controls.Add($lblTelemetry)
+    $telSize = if ($tf) { 10 } else { 8 }
+    $lblTelemetry = New-Object System.Windows.Forms.Label; $lblTelemetry.Text = "Telemetry Visibility:"; $lblTelemetry.Font = New-Object System.Drawing.Font("Arial", $telSize, [System.Drawing.FontStyle]::Bold); $lblTelemetry.Location = P 20 195; $lblTelemetry.AutoSize = $true; $tabMonitor.Controls.Add($lblTelemetry)
 
-    $lblTitleCol = New-Object System.Windows.Forms.Label
-    $lblTitleCol.Text = "Window Title"
-    $lblTitleCol.Location = New-Object System.Drawing.Point(20, 215)
-    $lblTitleCol.AutoSize = $true
-    $tabMonitor.Controls.Add($lblTitleCol)
+    $lblTitleCol = New-Object System.Windows.Forms.Label; $lblTitleCol.Text = "Window Title"; $lblTitleCol.Location = P 20 215; $lblTitleCol.AutoSize = $true; $tabMonitor.Controls.Add($lblTitleCol)
+    $lblTrayCol = New-Object System.Windows.Forms.Label; $lblTrayCol.Text = "System Tray"; $lblTrayCol.Location = P 170 215; $lblTrayCol.AutoSize = $true; $tabMonitor.Controls.Add($lblTrayCol)
 
-    $lblTrayCol = New-Object System.Windows.Forms.Label
-    $lblTrayCol.Text = "System Tray"
-    $lblTrayCol.Location = New-Object System.Drawing.Point(170, 215)
-    $lblTrayCol.AutoSize = $true
-    $tabMonitor.Controls.Add($lblTrayCol)
+    $chkTitlePid = New-Object System.Windows.Forms.CheckBox; $chkTitlePid.Text = "PID"; $chkTitlePid.Location = P 20 240; $chkTitlePid.AutoSize = $true; $chkTitlePid.Checked = $monitorData.titlePid; $tabMonitor.Controls.Add($chkTitlePid)
+    $chkTrayPid = New-Object System.Windows.Forms.CheckBox; $chkTrayPid.Text = "PID"; $chkTrayPid.Location = P 170 240; $chkTrayPid.AutoSize = $true; $chkTrayPid.Checked = $monitorData.trayPid; $tabMonitor.Controls.Add($chkTrayPid)
 
-    $chkTitlePid = New-Object System.Windows.Forms.CheckBox; $chkTitlePid.Text = "PID"; $chkTitlePid.Location = New-Object System.Drawing.Point(20, 240); $chkTitlePid.AutoSize = $true; $chkTitlePid.Checked = $monitorData.titlePid; $tabMonitor.Controls.Add($chkTitlePid)
-    $chkTrayPid = New-Object System.Windows.Forms.CheckBox; $chkTrayPid.Text = "PID"; $chkTrayPid.Location = New-Object System.Drawing.Point(170, 240); $chkTrayPid.AutoSize = $true; $chkTrayPid.Checked = $monitorData.trayPid; $tabMonitor.Controls.Add($chkTrayPid)
+    $chkTitlePorts = New-Object System.Windows.Forms.CheckBox; $chkTitlePorts.Text = "Ports"; $chkTitlePorts.Location = P 20 265; $chkTitlePorts.AutoSize = $true; $chkTitlePorts.Checked = $monitorData.titlePorts; $tabMonitor.Controls.Add($chkTitlePorts)
+    $chkTrayPorts = New-Object System.Windows.Forms.CheckBox; $chkTrayPorts.Text = "Ports"; $chkTrayPorts.Location = P 170 265; $chkTrayPorts.AutoSize = $true; $chkTrayPorts.Checked = $monitorData.trayPorts; $tabMonitor.Controls.Add($chkTrayPorts)
 
-    $chkTitlePorts = New-Object System.Windows.Forms.CheckBox; $chkTitlePorts.Text = "Ports"; $chkTitlePorts.Location = New-Object System.Drawing.Point(20, 265); $chkTitlePorts.AutoSize = $true; $chkTitlePorts.Checked = $monitorData.titlePorts; $tabMonitor.Controls.Add($chkTitlePorts)
-    $chkTrayPorts = New-Object System.Windows.Forms.CheckBox; $chkTrayPorts.Text = "Ports"; $chkTrayPorts.Location = New-Object System.Drawing.Point(170, 265); $chkTrayPorts.AutoSize = $true; $chkTrayPorts.Checked = $monitorData.trayPorts; $tabMonitor.Controls.Add($chkTrayPorts)
+    $chkTitleLobby = New-Object System.Windows.Forms.CheckBox; $chkTitleLobby.Text = "Lobby Info"; $chkTitleLobby.Location = P 20 290; $chkTitleLobby.AutoSize = $true; $chkTitleLobby.Checked = $monitorData.titleLobby; $tabMonitor.Controls.Add($chkTitleLobby)
+    $chkTrayLobby = New-Object System.Windows.Forms.CheckBox; $chkTrayLobby.Text = "Lobby Info"; $chkTrayLobby.Location = P 170 290; $chkTrayLobby.AutoSize = $true; $chkTrayLobby.Checked = $monitorData.trayLobby; $tabMonitor.Controls.Add($chkTrayLobby)
 
-    $chkTitleLobby = New-Object System.Windows.Forms.CheckBox; $chkTitleLobby.Text = "Lobby Info [API]"; $chkTitleLobby.Location = New-Object System.Drawing.Point(20, 290); $chkTitleLobby.AutoSize = $true; $chkTitleLobby.Checked = $monitorData.titleLobby; $tabMonitor.Controls.Add($chkTitleLobby)
-    $chkTrayLobby = New-Object System.Windows.Forms.CheckBox; $chkTrayLobby.Text = "Lobby Info [API]"; $chkTrayLobby.Location = New-Object System.Drawing.Point(170, 290); $chkTrayLobby.AutoSize = $true; $chkTrayLobby.Checked = $monitorData.trayLobby; $tabMonitor.Controls.Add($chkTrayLobby)
+    $chkTitlePlayers = New-Object System.Windows.Forms.CheckBox; $chkTitlePlayers.Text = "Player Count"; $chkTitlePlayers.Location = P 20 315; $chkTitlePlayers.AutoSize = $true; $chkTitlePlayers.Checked = $monitorData.titlePlayers; $tabMonitor.Controls.Add($chkTitlePlayers)
+    $chkTrayPlayers = New-Object System.Windows.Forms.CheckBox; $chkTrayPlayers.Text = "Player Count"; $chkTrayPlayers.Location = P 170 315; $chkTrayPlayers.AutoSize = $true; $chkTrayPlayers.Checked = $monitorData.trayPlayers; $tabMonitor.Controls.Add($chkTrayPlayers)
 
-    $chkTitlePlayers = New-Object System.Windows.Forms.CheckBox; $chkTitlePlayers.Text = "Player Count [API]"; $chkTitlePlayers.Location = New-Object System.Drawing.Point(20, 315); $chkTitlePlayers.AutoSize = $true; $chkTitlePlayers.Checked = $monitorData.titlePlayers; $tabMonitor.Controls.Add($chkTitlePlayers)
-    $chkTrayPlayers = New-Object System.Windows.Forms.CheckBox; $chkTrayPlayers.Text = "Player Count [API]"; $chkTrayPlayers.Location = New-Object System.Drawing.Point(170, 315); $chkTrayPlayers.AutoSize = $true; $chkTrayPlayers.Checked = $monitorData.trayPlayers; $tabMonitor.Controls.Add($chkTrayPlayers)
+    $chkTitleUptime = New-Object System.Windows.Forms.CheckBox; $chkTitleUptime.Text = "Uptime"; $chkTitleUptime.Location = P 20 340; $chkTitleUptime.AutoSize = $true; $chkTitleUptime.Checked = $monitorData.titleUptime; $tabMonitor.Controls.Add($chkTitleUptime)
+    $chkTrayUptime = New-Object System.Windows.Forms.CheckBox; $chkTrayUptime.Text = "Uptime"; $chkTrayUptime.Location = P 170 340; $chkTrayUptime.AutoSize = $true; $chkTrayUptime.Checked = $monitorData.trayUptime; $tabMonitor.Controls.Add($chkTrayUptime)
 
-    $chkTitleUptime = New-Object System.Windows.Forms.CheckBox; $chkTitleUptime.Text = "Uptime"; $chkTitleUptime.Location = New-Object System.Drawing.Point(20, 340); $chkTitleUptime.AutoSize = $true; $chkTitleUptime.Checked = $monitorData.titleUptime; $tabMonitor.Controls.Add($chkTitleUptime)
-    $chkTrayUptime = New-Object System.Windows.Forms.CheckBox; $chkTrayUptime.Text = "Uptime"; $chkTrayUptime.Location = New-Object System.Drawing.Point(170, 340); $chkTrayUptime.AutoSize = $true; $chkTrayUptime.Checked = $monitorData.trayUptime; $tabMonitor.Controls.Add($chkTrayUptime)
+    $chkTouch = New-Object System.Windows.Forms.CheckBox; $chkTouch.Text = "Enable Touch-Friendly Interface"; $chkTouch.Location = P 20 375; $chkTouch.AutoSize = $true; $chkTouch.Checked = $monitorData.touchFriendly; $tabMonitor.Controls.Add($chkTouch)
 
-    # Setup the logic specifically for the new Monitor API Usage checkbox
+    # Setup the logic specifically for the Monitor API Usage checkbox
     $chkAllowMonitorApi.Add_CheckedChanged({
         $enabled = $chkAllowMonitorApi.Checked
         $chkTitleLobby.Enabled = $enabled; $chkTrayLobby.Enabled = $enabled
@@ -607,55 +519,46 @@ Function Show-ConfigWindow {
 
     $lblTitle = New-Object System.Windows.Forms.Label
     $lblTitle.Text = "EchoVR Server Monitor"
-    if ($pfcStencil.Families.Count -gt 0) { $lblTitle.Font = New-Object System.Drawing.Font($pfcStencil.Families[0], 12, [System.Drawing.FontStyle]::Regular) } 
-    else { $lblTitle.Font = New-Object System.Drawing.Font("Arial", 14, [System.Drawing.FontStyle]::Bold) }
+    
+    $titleStencilSize = if ($tf) { 16 } else { 12 }
+    $titleArialSize = if ($tf) { 18 } else { 14 }
+    
+    if ($pfcStencil.Families.Count -gt 0) { $lblTitle.Font = New-Object System.Drawing.Font($pfcStencil.Families[0], $titleStencilSize, [System.Drawing.FontStyle]::Regular) } 
+    else { $lblTitle.Font = New-Object System.Drawing.Font("Arial", $titleArialSize, [System.Drawing.FontStyle]::Bold) }
+    
     $lblTitle.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-    $lblTitle.Location = New-Object System.Drawing.Point(10, 40)
-    $lblTitle.Size = New-Object System.Drawing.Size(400, 30)
+    $lblTitle.Location = P 10 40; $lblTitle.Size = S 400 30
     $tabAbout.Controls.Add($lblTitle)
 
     $lblVersion = New-Object System.Windows.Forms.Label
     $lblVersion.Text = "v$($Global:Version)"
-    if ($pfcNeuro.Families.Count -gt 0) { $lblVersion.Font = New-Object System.Drawing.Font($pfcNeuro.Families[0], 12, [System.Drawing.FontStyle]::Bold) } 
-    else { $lblVersion.Font = New-Object System.Drawing.Font("Arial", 12, [System.Drawing.FontStyle]::Bold) }
+    
+    $versionSize = if ($tf) { 16 } else { 12 }
+    
+    if ($pfcNeuro.Families.Count -gt 0) { $lblVersion.Font = New-Object System.Drawing.Font($pfcNeuro.Families[0], $versionSize, [System.Drawing.FontStyle]::Bold) } 
+    else { $lblVersion.Font = New-Object System.Drawing.Font("Arial", $versionSize, [System.Drawing.FontStyle]::Bold) }
+    
     $lblVersion.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-    $lblVersion.Location = New-Object System.Drawing.Point(10, 65)
-    $lblVersion.Size = New-Object System.Drawing.Size(400, 30)
+    $lblVersion.Location = P 10 65; $lblVersion.Size = S 400 30
     $tabAbout.Controls.Add($lblVersion)
 
     $lblPing = New-Object System.Windows.Forms.Label
     $lblPing.Text = "Ping @berg_ on Discord for issues/feedback!"
     $lblPing.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-    $lblPing.Location = New-Object System.Drawing.Point(10, 110)
-    $lblPing.Size = New-Object System.Drawing.Size(400, 20)
+    $lblPing.Location = P 10 110; $lblPing.Size = S 400 20
     $tabAbout.Controls.Add($lblPing)
 
     $btnAboutUpdate = New-Object System.Windows.Forms.Button
     $btnAboutUpdate.Text = "Check for Updates"
-    $btnAboutUpdate.Location = New-Object System.Drawing.Point(135, 150)
-    $btnAboutUpdate.Size = New-Object System.Drawing.Size(150, 30)
+    $btnAboutUpdate.Location = P 135 150; $btnAboutUpdate.Size = S 150 30
     $btnAboutUpdate.Add_Click({ Test-ForUpdates -ManualCheck $true })
     $tabAbout.Controls.Add($btnAboutUpdate)
 
     # --- BOTTOM BUTTONS ---
-    $btnOpenLocal = New-Object System.Windows.Forms.Button
-    $btnOpenLocal.Text = "Open Server Config"
-    $btnOpenLocal.Location = New-Object System.Drawing.Point(30, 485)
-    $btnOpenLocal.Size = New-Object System.Drawing.Size(180, 25)
-    $btnOpenLocal.Add_Click({ Invoke-Item $LocalConfigPath })
-    $form.Controls.Add($btnOpenLocal)
-
-    $btnOpenEcho = New-Object System.Windows.Forms.Button
-    $btnOpenEcho.Text = "Open Echo Folder"
-    $btnOpenEcho.Location = New-Object System.Drawing.Point(235, 485)
-    $btnOpenEcho.Size = New-Object System.Drawing.Size(180, 25)
-    $btnOpenEcho.Add_Click({ Invoke-Item $ScriptRoot })
-    $form.Controls.Add($btnOpenEcho)
+    $btnOpenLocal = New-Object System.Windows.Forms.Button; $btnOpenLocal.Text = "Open Server Config"; $btnOpenLocal.Location = P 30 485; $btnOpenLocal.Size = S 180 25; $btnOpenLocal.Add_Click({ Invoke-Item $LocalConfigPath }); $form.Controls.Add($btnOpenLocal)
+    $btnOpenEcho = New-Object System.Windows.Forms.Button; $btnOpenEcho.Text = "Open Echo Folder"; $btnOpenEcho.Location = P 235 485; $btnOpenEcho.Size = S 180 25; $btnOpenEcho.Add_Click({ Invoke-Item $ScriptRoot }); $form.Controls.Add($btnOpenEcho)
     
-    $btnSave = New-Object System.Windows.Forms.Button
-    $btnSave.Text = "Save"
-    $btnSave.Location = New-Object System.Drawing.Point(85, 520)
-    $btnSave.Size = New-Object System.Drawing.Size(80, 25)
+    $btnSave = New-Object System.Windows.Forms.Button; $btnSave.Text = "Save"; $btnSave.Location = P 85 520; $btnSave.Size = S 80 25; $form.Controls.Add($btnSave)
     $btnSave.Add_Click({
         try {
             if ([int]$txtInst.Text -lt 1) { throw "Invalid Instances" }
@@ -667,12 +570,8 @@ Function Show-ConfigWindow {
             [System.Windows.Forms.MessageBox]::Show("Please enter valid numbers for the required fields.", "Input Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
         }
     })
-    $form.Controls.Add($btnSave)
 
-    $btnRestore = New-Object System.Windows.Forms.Button
-    $btnRestore.Text = "Defaults"
-    $btnRestore.Location = New-Object System.Drawing.Point(180, 520)
-    $btnRestore.Size = New-Object System.Drawing.Size(80, 25)
+    $btnRestore = New-Object System.Windows.Forms.Button; $btnRestore.Text = "Defaults"; $btnRestore.Location = P 180 520; $btnRestore.Size = S 80 25; $form.Controls.Add($btnRestore)
     $btnRestore.Add_Click({
         $txtInst.Text = "1"; $txtPort.Text = "6792"; $txtThreads.Text = "2"; $rbStd.Checked = $true
         $txtArgs.Text = "-server -headless -noovr -fixedtimestep -nosymbollookup"
@@ -683,15 +582,10 @@ Function Show-ConfigWindow {
         $chkAllowMonitorApi.Checked = $true
         $chkTitlePid.Checked = $true; $chkTitlePorts.Checked = $true; $chkTitleLobby.Checked = $true; $chkTitlePlayers.Checked = $true; $chkTitleUptime.Checked = $true
         $chkTrayPid.Checked = $true; $chkTrayPorts.Checked = $true; $chkTrayLobby.Checked = $false; $chkTrayPlayers.Checked = $true; $chkTrayUptime.Checked = $true
+        $chkTouch.Checked = $false
     })
-    $form.Controls.Add($btnRestore)
 
-    $btnCancel = New-Object System.Windows.Forms.Button
-    $btnCancel.Text = "Discard"
-    $btnCancel.Location = New-Object System.Drawing.Point(275, 520)
-    $btnCancel.Size = New-Object System.Drawing.Size(80, 25)
-    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-    $form.Controls.Add($btnCancel)
+    $btnCancel = New-Object System.Windows.Forms.Button; $btnCancel.Text = "Discard"; $btnCancel.Location = P 275 520; $btnCancel.Size = S 80 25; $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel; $form.Controls.Add($btnCancel)
 
     $result = $form.ShowDialog()
 
@@ -723,6 +617,7 @@ Function Show-ConfigWindow {
         $monitorData.allowMonitorApi = $chkAllowMonitorApi.Checked
         $monitorData.titlePid = $chkTitlePid.Checked; $monitorData.titlePorts = $chkTitlePorts.Checked; $monitorData.titleLobby = $chkTitleLobby.Checked; $monitorData.titlePlayers = $chkTitlePlayers.Checked; $monitorData.titleUptime = $chkTitleUptime.Checked
         $monitorData.trayPid = $chkTrayPid.Checked; $monitorData.trayPorts = $chkTrayPorts.Checked; $monitorData.trayLobby = $chkTrayLobby.Checked; $monitorData.trayPlayers = $chkTrayPlayers.Checked; $monitorData.trayUptime = $chkTrayUptime.Checked
+        $monitorData.touchFriendly = $chkTouch.Checked
 
         $Global:BasePort = $monitorData.basePort
 
@@ -730,6 +625,7 @@ Function Show-ConfigWindow {
         Set-ApiAccess $monitorData.enableApi
         Save-MonitorConfig $monitorData
         Update-ExternalConfigs $numInst
+        Set-TrayStyle
 
         # Only perform a soft shutdown if server settings were altered
         if ($serverSettingsChanged) {
@@ -771,8 +667,6 @@ Function Get-AvailablePortPair {
 # 7. SYSTEM TRAY & MENU
 # ==============================================================================
 
-$ContextMenuStrip = New-Object System.Windows.Forms.ContextMenuStrip
-
 $MenuItemStatus = New-Object System.Windows.Forms.ToolStripMenuItem
 $MenuItemStatus.Text = "Status: Initializing..."
 $MenuItemStatus.Enabled = $false
@@ -788,7 +682,7 @@ $ContextMenuStrip.Items.Add($MenuItemConfig) | Out-Null
 
 $MenuItemPortal = New-Object System.Windows.Forms.ToolStripMenuItem
 $MenuItemPortal.Text = "Open EchoVRCE Portal"
-$MenuItemPortal.Add_Click({ Start-Process "https://echovrce.com/" })
+$MenuItemPortal.Add_Click({ Start-Process $portalURL })
 $ContextMenuStrip.Items.Add($MenuItemPortal) | Out-Null
 
 $ContextMenuStrip.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
@@ -821,6 +715,22 @@ $NotifyIcon.Icon = [System.Drawing.Icon]::ExtractAssociatedIcon($EchoExePath)
 $NotifyIcon.Text = "EchoVR Server Monitor"
 $NotifyIcon.ContextMenuStrip = $ContextMenuStrip
 $NotifyIcon.Visible = $true
+
+# Triggers standard context menu via hacky reflection to get it to display natively on left click 
+$NotifyIcon.Add_MouseClick({
+    if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+        try {
+            $mi = [System.Windows.Forms.NotifyIcon].GetMethod("ShowContextMenu", [System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Instance)
+            $mi.Invoke($NotifyIcon, $null)
+        } catch { }
+    }
+})
+
+$NotifyIcon.Add_DoubleClick({
+    $MonitorTimer.Stop()
+    Show-ConfigWindow
+    $MonitorTimer.Start()
+})
 
 # ==============================================================================
 # 8. NATIVE API POLLING
@@ -953,8 +863,7 @@ $MonitorAction = {
                                 $conf = Get-MonitorConfig; $conf.pauseSpawning = $true; Save-MonitorConfig $conf
                                 $msgBody = "Your link code is: $code`n`nClick OK to open command central.`nClick Link EchoVRCE and enter your code.`n`nUnpause server spawning in the system tray after linking."
                                 $msgTitle = "Link Code Detected"
-                                $discordUrl = "discord://-/channels/779349159852769310/1227795372244729926/1355176306484056084"
-                                $cmd = "Add-Type -AssemblyName System.Windows.Forms; `$res = [System.Windows.Forms.MessageBox]::Show('$msgBody', '$msgTitle', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information); if (`$res -eq [System.Windows.Forms.DialogResult]::OK) { Start-Process '$discordUrl' }"
+                                $cmd = "Add-Type -AssemblyName System.Windows.Forms; `$res = [System.Windows.Forms.MessageBox]::Show('$msgBody', '$msgTitle', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information); if (`$res -eq [System.Windows.Forms.DialogResult]::OK) { Start-Process '$headsetLinkURL' }"
                                 $bytes = [System.Text.Encoding]::Unicode.GetBytes($cmd)
                                 $encodedCommand = [Convert]::ToBase64String($bytes)
                                 Start-Process -FilePath "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-EncodedCommand $encodedCommand" -WindowStyle Hidden
@@ -1018,13 +927,13 @@ $MonitorAction = {
                     $activePlayers = $totalConnected - $specs
 
                     if ($totalConnected -eq 0) {
-                        $pStrTitle = "0 Players Connected"; $pStrTray = "0 Players"
+                        $pStrTitle = "0 Active Players"; $pStrTray = "0 Players"
                     } else {
                         if ($specs -gt 0) {
-                            $pStrTitle = "$activePlayers Players Connected ($specs Spectating)"
+                            $pStrTitle = "$activePlayers Active Players ($specs Spectating)"
                             $pStrTray = "$activePlayers Players ($specs Spec.)"
                         } else {
-                            $pStrTitle = "$activePlayers Players Connected"
+                            $pStrTitle = "$activePlayers Active Players"
                             $pStrTray = "$activePlayers Players"
                         }
                     }
@@ -1140,7 +1049,7 @@ Function Test-FileHash ($path, $targetHash) {
 }
 
 Function Update-DLLs ($Silent = $false) {
-    $rawBaseUrl = "https://raw.githubusercontent.com/$Global:GithubOwner/$Global:GithubRepo/main/dll"
+    $rawBaseUrl = $dllURL
     $urlPNSRAD = "$rawBaseUrl/pnsradgameserver.dll"
     $urlDBG    = "$rawBaseUrl/dbgcore.dll"
 
@@ -1177,7 +1086,7 @@ Function Update-DLLs ($Silent = $false) {
 }
 
 Function Test-ForUpdates ($ManualCheck = $false) {
-    $apiUrl = "https://api.github.com/repos/$($Global:GithubOwner)/$($Global:GithubRepo)/releases/latest"
+    $apiUrl = $releasesURL
     $TargetFileName = if ($Global:IsBinary) { "EchoVR-Server-Monitor.exe" } else { "EchoVR-Server-Monitor.ps1" }
     
     $monitorUpdateAvailable = $false; $monitorAssetUrl = $null; $dllUpdateAvailable = $false
