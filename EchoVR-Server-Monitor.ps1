@@ -5,14 +5,14 @@
 ###################################################################
 
 # Changes 
+# v5.1.2 - Exposed -exitonerror launch argument in the Server Settings tab.
 # v5.1.1 - Minor UI changes for better wording. Makes DLL auto-updates queue shutdown, monitor actually auto-updates at midnight instead of every 24h. Adds last update check indicator in About tab.
 # v5.1.0 - Added Touch-Friendly UI option, left-click tray menu, and double-click tray for config.
-# v5.0.1 - Readded manual log archive/purge buttons that got missed during the UI update.
 
 # ==============================================================================
 # GLOBAL SETTINGS
 # ==============================================================================
-$Global:Version = "5.1.1"
+$Global:Version = "5.1.2"
 $Global:GithubOwner = "EchoTools"
 $Global:GithubRepo  = "EchoVR-Windows-Hosts-Resources"
 
@@ -229,6 +229,7 @@ Function Get-MonitorConfig {
         numTaskThreads = 2
         timeStep = 120
         additionalArgs = "-server -headless -noovr -fixedtimestep -nosymbollookup"
+        exitOnError = $true
         suppressSetupWarning = $false
         autoUpdate = $true
         updateInterval = "Daily"
@@ -463,6 +464,8 @@ Function Show-ConfigWindow {
 
     $chkApi = New-Object System.Windows.Forms.CheckBox; $chkApi.Text = "Enable EchoVR API"; $chkApi.Location = P 20 220; $chkApi.AutoSize = $true; $chkApi.Checked = $monitorData.enableApi; $tabServer.Controls.Add($chkApi)
 
+    $chkExitOnError = New-Object System.Windows.Forms.CheckBox; $chkExitOnError.Text = "Automatically Restart Instances (-exitonerror)"; $chkExitOnError.Location = P 20 245; $chkExitOnError.AutoSize = $true; $chkExitOnError.Checked = $monitorData.exitOnError; $tabServer.Controls.Add($chkExitOnError)
+
     # --- TAB 2: MONITOR SETTINGS ---
     $tabMonitor = New-Object System.Windows.Forms.TabPage
     $tabMonitor.Text = "Monitor Settings"
@@ -633,6 +636,7 @@ Function Show-ConfigWindow {
     $btnRestore.Add_Click({
         $txtInst.Text = "1"; $txtPort.Text = "6792"; $txtThreads.Text = "2"; $rbStd.Checked = $true
         $txtArgs.Text = "-server -headless -noovr -fixedtimestep -nosymbollookup"
+        $chkExitOnError.Checked = $true
         $txtCheck.Text = "5"; $chkStartup.Checked = $true; $chkArchive.Checked = $true
         $chkPurge.Checked = $false; $cmbPurge.SelectedItem = "Weekly"
         $chkAutoUpdate.Checked = $true; $cmbUpdate.SelectedItem = "Daily"
@@ -659,6 +663,7 @@ Function Show-ConfigWindow {
         if ($monitorData.timeStep -ne $tStep) { $serverSettingsChanged = $true }
         if ($monitorData.additionalArgs -ne $txtArgs.Text) { $serverSettingsChanged = $true }
         if ($monitorData.enableApi -ne $chkApi.Checked) { $serverSettingsChanged = $true }
+        if ($monitorData.exitOnError -ne $chkExitOnError.Checked) { $serverSettingsChanged = $true }
 
         $monitorData.amountOfInstances = $numInst
         $monitorData.basePort = [int]$txtPort.Text
@@ -666,6 +671,7 @@ Function Show-ConfigWindow {
         $monitorData.numTaskThreads = [int]$txtThreads.Text
         $monitorData.timeStep = $tStep
         $monitorData.additionalArgs = $txtArgs.Text
+        $monitorData.exitOnError = $chkExitOnError.Checked
         $monitorData.autoUpdate = $chkAutoUpdate.Checked
         $monitorData.updateInterval = $cmbUpdate.SelectedItem
         $monitorData.autoArchive = $chkArchive.Checked
@@ -1098,7 +1104,8 @@ $MonitorAction = {
             if (-not $freshConfig.pauseSpawning -and -not $Global:LinkCodeActive) {
                 $portPair = Get-AvailablePortPair
                 if ($null -ne $portPair) {
-                    $launchArgs = "-numtaskthreads $($config.numTaskThreads) -timestep $($config.timeStep) $($config.additionalArgs) -port $($portPair.GS) -httpport $($portPair.API) -exitonerror"
+                    $exitArg = if ($config.exitOnError) { " -exitonerror" } else { "" }
+                    $launchArgs = "-numtaskthreads $($config.numTaskThreads) -timestep $($config.timeStep) $($config.additionalArgs) -port $($portPair.GS) -httpport $($portPair.API)$exitArg"
                     $newProc = Start-Process -FilePath $EchoExePath -ArgumentList $launchArgs -WindowStyle Minimized -PassThru
                     
                     if ($newProc) {
