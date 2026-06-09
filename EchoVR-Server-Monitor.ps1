@@ -5,14 +5,14 @@
 ###################################################################
 
 # Changes 
+# v5.2.0 - Added Manual Port Mapping and Guild Restriction, adds EnableVisualStyles for a cleaner look.
 # v5.1.2 - Exposed -exitonerror launch argument in the Server Settings tab.
 # v5.1.1 - Minor UI changes for better wording. Makes DLL auto-updates queue shutdown, monitor actually auto-updates at midnight instead of every 24h. Adds last update check indicator in About tab.
-# v5.1.0 - Added Touch-Friendly UI option, left-click tray menu, and double-click tray for config.
 
 # ==============================================================================
 # GLOBAL SETTINGS
 # ==============================================================================
-$Global:Version = "5.1.2"
+$Global:Version = "5.2.0"
 $Global:GithubOwner = "EchoTools"
 $Global:GithubRepo  = "EchoVR-Windows-Hosts-Resources"
 
@@ -40,14 +40,18 @@ $Global:LastLogMaintenanceDay = -1
 # Setting up system tray menu and GUI
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+try { [System.Windows.Forms.Application]::EnableVisualStyles() } catch { }
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public class Win32Window {
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     public static extern bool SetWindowText(IntPtr hWnd, string text);
+    
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    public static extern IntPtr SendMessage(IntPtr hWnd, int Msg, IntPtr wParam, [MarshalAs(UnmanagedType.LPWStr)] string lParam);
 }
-"@
+"@ -ErrorAction SilentlyContinue
 
 # ==============================================================================
 # 0. MODE DETECTION, SINGLE INSTANCE CHECK
@@ -214,6 +218,42 @@ Function Repair-NetConfigFiles {
     }
 }
 
+Function Get-Guilds {
+    if (Test-Path $LocalConfigPath) {
+        try {
+            $c = Get-Content $LocalConfigPath -Raw | ConvertFrom-Json
+            if ($c.serverdb_host -match "&guilds=([0-9,]+)") {
+                return $Matches[1]
+            }
+        } catch {}
+    }
+    return ""
+}
+
+Function Set-Guilds ($guildsStr) {
+    if (Test-Path $LocalConfigPath) {
+        try {
+            $c = Get-Content $LocalConfigPath -Raw | ConvertFrom-Json
+            if ($null -ne $c.serverdb_host) {
+                $hostStr = $c.serverdb_host
+                if ($hostStr -match "&guilds=[0-9,]+") {
+                    if ([string]::IsNullOrWhiteSpace($guildsStr)) {
+                        $hostStr = $hostStr -replace "&guilds=[0-9,]+", ""
+                    } else {
+                        $hostStr = $hostStr -replace "&guilds=[0-9,]+", "&guilds=$guildsStr"
+                    }
+                } else {
+                    if (-not [string]::IsNullOrWhiteSpace($guildsStr)) {
+                        $hostStr += "&guilds=$guildsStr"
+                    }
+                }
+                $c.serverdb_host = $hostStr
+                $c | ConvertTo-Json -Depth 10 | Set-Content $LocalConfigPath
+            }
+        } catch {}
+    }
+}
+
 Import-PortMap
 Repair-NetConfigFiles
 
@@ -225,6 +265,8 @@ Function Get-MonitorConfig {
     $defaultConfig = @{
         amountOfInstances = 1
         basePort = 6792
+        portMappingMode = "Automatic"
+        manualPortArray = @()
         delayProcessCheck = 5000
         numTaskThreads = 2
         timeStep = 120
@@ -406,6 +448,98 @@ Function Set-TrayStyle {
 }
 Set-TrayStyle
 
+Function Show-PortConfigWindow {
+    param([int]$numInstances, [array]$currentPorts)
+
+    $tf = $Global:ConfigForm.Font.Name -eq "Segoe UI"
+    $xScale = if ($tf) { 1.25 } else { 1 }
+    $yScale = if ($tf) { 1.5 } else { 1 }
+    
+    Function P2($x, $y) { return New-Object System.Drawing.Point([int]($x * $xScale), [int]($y * $yScale)) }
+    Function S2($w, $h) { return New-Object System.Drawing.Size([int]($w * $xScale), [int]($h * $yScale)) }
+
+    $portForm = New-Object System.Windows.Forms.Form
+    $portForm.Text = "Configure Manual Ports"
+    $portForm.Size = S2 380 400
+    $portForm.StartPosition = "CenterParent"
+    $portForm.FormBorderStyle = "FixedDialog"
+    $portForm.MaximizeBox = $false
+    if ($tf) { $portForm.Font = New-Object System.Drawing.Font("Segoe UI", 11) }
+
+    $panel = New-Object System.Windows.Forms.Panel
+    $panel.Location = P2 10 10
+    $panel.Size = S2 340 300
+    $panel.AutoScroll = $true
+    $portForm.Controls.Add($panel)
+
+    $ctrlPairs = @()
+    $yOffset = 0
+
+    for ($i = 0; $i -lt $numInstances; $i++) {
+        $lblInst = New-Object System.Windows.Forms.Label; $lblInst.Text = "Instance $($i + 1):"; $lblInst.Font = New-Object System.Drawing.Font($portForm.Font, [System.Drawing.FontStyle]::Bold); $lblInst.Location = P2 10 $yOffset; $lblInst.AutoSize = $true; $panel.Controls.Add($lblInst)
+        $lblMap = New-Object System.Windows.Forms.Label; $lblMap.Text = "Port mapping:"; $lblMap.Location = P2 160 $yOffset; $lblMap.AutoSize = $true; $panel.Controls.Add($lblMap)
+        
+        $yOffset += 25
+        $lblGS = New-Object System.Windows.Forms.Label; $lblGS.Text = "GameServer  ->"; $lblGS.Location = P2 20 $yOffset; $lblGS.AutoSize = $true; $panel.Controls.Add($lblGS)
+        $txtGS = New-Object System.Windows.Forms.TextBox; $txtGS.Location = P2 160 $yOffset; $txtGS.Size = S2 80 20; 
+        
+        $yOffset += 25
+        $lblAPI = New-Object System.Windows.Forms.Label; $lblAPI.Text = "API              ->"; $lblAPI.Location = P2 20 $yOffset; $lblAPI.AutoSize = $true; $panel.Controls.Add($lblAPI)
+        $txtAPI = New-Object System.Windows.Forms.TextBox; $txtAPI.Location = P2 160 $yOffset; $txtAPI.Size = S2 80 20; 
+        
+        if ($i -lt $currentPorts.Count) {
+            $txtGS.Text = "$($currentPorts[$i].GS)"
+            $txtAPI.Text = "$($currentPorts[$i].API)"
+        }
+
+        $panel.Controls.Add($txtGS)
+        $panel.Controls.Add($txtAPI)
+        
+        $ctrlPairs += @{ GS = $txtGS; API = $txtAPI }
+        $yOffset += 40
+    }
+
+    $btnSave = New-Object System.Windows.Forms.Button; $btnSave.Text = "Save"; $btnSave.Location = P2 90 320; $btnSave.Size = S2 80 25; $portForm.Controls.Add($btnSave)
+    $btnSave.Add_Click({
+        $err = $false
+        $seen = @{}
+        $newPorts = @()
+
+        foreach ($p in $ctrlPairs) {
+            $gsStr = $p.GS.Text; $apiStr = $p.API.Text
+            if ([string]::IsNullOrWhiteSpace($gsStr) -or [string]::IsNullOrWhiteSpace($apiStr)) { $err = $true; break }
+            
+            try { $gsInt = [int]$gsStr; $apiInt = [int]$apiStr } catch { $err = $true; break }
+            
+            if ($gsInt -lt 1 -or $gsInt -gt 65535 -or $apiInt -lt 1 -or $apiInt -gt 65535) { $err = $true; break }
+            if ($gsInt -eq $apiInt) { $err = $true; break }
+            if ($seen[$gsInt] -or $seen[$apiInt]) { $err = $true; break }
+            
+            $seen[$gsInt] = $true; $seen[$apiInt] = $true
+            $newPorts += @{ GS = $gsInt; API = $apiInt }
+        }
+
+        if ($err) {
+            [System.Windows.Forms.MessageBox]::Show("Please ensure all ports are valid numbers (1-65535), not empty, and completely unique (no duplicates or matching pairs).", "Validation Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+        } else {
+            $portForm.Tag = $newPorts
+            $portForm.DialogResult = [System.Windows.Forms.DialogResult]::OK
+            $portForm.Close()
+        }
+    })
+
+    $btnDiscard = New-Object System.Windows.Forms.Button; $btnDiscard.Text = "Discard"; $btnDiscard.Location = P2 190 320; $btnDiscard.Size = S2 80 25; $portForm.Controls.Add($btnDiscard)
+    $btnDiscard.Add_Click({
+        $portForm.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+        $portForm.Close()
+    })
+
+    $res = $portForm.ShowDialog()
+    if ($res -eq [System.Windows.Forms.DialogResult]::OK) { return $portForm.Tag }
+    return $null
+}
+
+
 Function Show-ConfigWindow {
     if ($null -ne $Global:ConfigForm -and -not $Global:ConfigForm.IsDisposed) {
         if ($Global:ConfigForm.WindowState -eq 'Minimized') {
@@ -447,24 +581,61 @@ Function Show-ConfigWindow {
     $lblInst = New-Object System.Windows.Forms.Label; $lblInst.Text = "Number of Instances:"; $lblInst.Location = P 20 25; $lblInst.AutoSize = $true; $tabServer.Controls.Add($lblInst)
     $txtInst = New-Object System.Windows.Forms.TextBox; $txtInst.Location = P 250 22; $txtInst.Size = S 120 20; $txtInst.Text = "$($monitorData.amountOfInstances)"; $tabServer.Controls.Add($txtInst)
 
-    $lblPort = New-Object System.Windows.Forms.Label; $lblPort.Text = "Base Port:"; $lblPort.Location = P 20 60; $lblPort.AutoSize = $true; $tabServer.Controls.Add($lblPort)
-    $txtPort = New-Object System.Windows.Forms.TextBox; $txtPort.Location = P 250 57; $txtPort.Size = S 120 20; $txtPort.Text = "$($monitorData.basePort)"; $tabServer.Controls.Add($txtPort)
+    $lblThreads = New-Object System.Windows.Forms.Label; $lblThreads.Text = "Max Threads per Instance:"; $lblThreads.Location = P 20 60; $lblThreads.AutoSize = $true; $tabServer.Controls.Add($lblThreads)
+    $txtThreads = New-Object System.Windows.Forms.TextBox; $txtThreads.Location = P 250 57; $txtThreads.Size = S 120 20; $txtThreads.Text = "$($monitorData.numTaskThreads)"; $tabServer.Controls.Add($txtThreads)
 
-    $lblThreads = New-Object System.Windows.Forms.Label; $lblThreads.Text = "Max Threads per Instance:"; $lblThreads.Location = P 20 95; $lblThreads.AutoSize = $true; $tabServer.Controls.Add($lblThreads)
-    $txtThreads = New-Object System.Windows.Forms.TextBox; $txtThreads.Location = P 250 92; $txtThreads.Size = S 120 20; $txtThreads.Text = "$($monitorData.numTaskThreads)"; $tabServer.Controls.Add($txtThreads)
+    $lblTime = New-Object System.Windows.Forms.Label; $lblTime.Text = "Server Timestep:"; $lblTime.Location = P 20 95; $lblTime.AutoSize = $true; $tabServer.Controls.Add($lblTime)
 
-    $lblTime = New-Object System.Windows.Forms.Label; $lblTime.Text = "Server Timestep:"; $lblTime.Location = P 20 130; $lblTime.AutoSize = $true; $tabServer.Controls.Add($lblTime)
-
-    $rbStd = New-Object System.Windows.Forms.RadioButton; $rbStd.Text = "Standard (120)"; $rbStd.Location = P 150 128; $rbStd.AutoSize = $true; $tabServer.Controls.Add($rbStd)
-    $rbComp = New-Object System.Windows.Forms.RadioButton; $rbComp.Text = "Competitive (180)"; $rbComp.Location = P 260 128; $rbComp.AutoSize = $true; $tabServer.Controls.Add($rbComp)
+    $rbStd = New-Object System.Windows.Forms.RadioButton; $rbStd.Text = "Standard (120)"; $rbStd.Location = P 150 93; $rbStd.AutoSize = $true; $tabServer.Controls.Add($rbStd)
+    $rbComp = New-Object System.Windows.Forms.RadioButton; $rbComp.Text = "Competitive (180)"; $rbComp.Location = P 260 93; $rbComp.AutoSize = $true; $tabServer.Controls.Add($rbComp)
     if ($monitorData.timeStep -eq 180) { $rbComp.Checked = $true } else { $rbStd.Checked = $true }
 
-    $lblArgs = New-Object System.Windows.Forms.Label; $lblArgs.Text = "Additional Args:"; $lblArgs.Location = P 20 165; $lblArgs.AutoSize = $true; $tabServer.Controls.Add($lblArgs)
-    $txtArgs = New-Object System.Windows.Forms.TextBox; $txtArgs.Location = P 20 185; $txtArgs.Size = S 380 20; $txtArgs.Text = "$($monitorData.additionalArgs)"; $tabServer.Controls.Add($txtArgs)
+    $lblArgs = New-Object System.Windows.Forms.Label; $lblArgs.Text = "Additional Args:"; $lblArgs.Location = P 20 130; $lblArgs.AutoSize = $true; $tabServer.Controls.Add($lblArgs)
+    $txtArgs = New-Object System.Windows.Forms.TextBox; $txtArgs.Location = P 20 150; $txtArgs.Size = S 380 20; $txtArgs.Text = "$($monitorData.additionalArgs)"; $tabServer.Controls.Add($txtArgs)
 
-    $chkApi = New-Object System.Windows.Forms.CheckBox; $chkApi.Text = "Enable EchoVR API"; $chkApi.Location = P 20 220; $chkApi.AutoSize = $true; $chkApi.Checked = $monitorData.enableApi; $tabServer.Controls.Add($chkApi)
+    $chkApi = New-Object System.Windows.Forms.CheckBox; $chkApi.Text = "Enable EchoVR API"; $chkApi.Location = P 20 185; $chkApi.AutoSize = $true; $chkApi.Checked = $monitorData.enableApi; $tabServer.Controls.Add($chkApi)
 
-    $chkExitOnError = New-Object System.Windows.Forms.CheckBox; $chkExitOnError.Text = "Automatically Restart Instances (-exitonerror)"; $chkExitOnError.Location = P 20 245; $chkExitOnError.AutoSize = $true; $chkExitOnError.Checked = $monitorData.exitOnError; $tabServer.Controls.Add($chkExitOnError)
+    $chkExitOnError = New-Object System.Windows.Forms.CheckBox; $chkExitOnError.Text = "Automatically Restart Instances (-exitonerror)"; $chkExitOnError.Location = P 20 210; $chkExitOnError.AutoSize = $true; $chkExitOnError.Checked = $monitorData.exitOnError; $tabServer.Controls.Add($chkExitOnError)
+
+    $lblPortMap = New-Object System.Windows.Forms.Label; $lblPortMap.Text = "Port Mapping:"; $lblPortMap.Location = P 20 240; $lblPortMap.AutoSize = $true; $tabServer.Controls.Add($lblPortMap)
+    
+    # isolate the portmap toggle from the timestep toggle
+    $pnlPortMap = New-Object System.Windows.Forms.Panel; $pnlPortMap.Location = P 100 235; $pnlPortMap.Size = S 150 30; $tabServer.Controls.Add($pnlPortMap)
+    $rbAutoMap = New-Object System.Windows.Forms.RadioButton; $rbAutoMap.Text = "Automatic"; $rbAutoMap.Location = P 5 3; $rbAutoMap.AutoSize = $true; $pnlPortMap.Controls.Add($rbAutoMap)
+    $rbManMap = New-Object System.Windows.Forms.RadioButton; $rbManMap.Text = "Manual"; $rbManMap.Location = P 85 3; $rbManMap.AutoSize = $true; $pnlPortMap.Controls.Add($rbManMap)
+    
+    $txtBasePort = New-Object System.Windows.Forms.TextBox; $txtBasePort.Location = P 260 238; $txtBasePort.Size = S 120 20; $txtBasePort.Text = "$($monitorData.basePort)"; $tabServer.Controls.Add($txtBasePort)
+    $btnConfigPorts = New-Object System.Windows.Forms.Button; $btnConfigPorts.Text = "Configure Ports"; $btnConfigPorts.Location = P 260 237; $btnConfigPorts.Size = S 120 23; $tabServer.Controls.Add($btnConfigPorts)
+
+    # Set hint on text box via P/Invoke
+    [Win32Window]::SendMessage($txtBasePort.Handle, 0x1501, [IntPtr]1, "Base Port") | Out-Null
+
+    $Global:TempManualPorts = @()
+    if ($monitorData.manualPortArray) { $Global:TempManualPorts = @($monitorData.manualPortArray) }
+
+    $btnConfigPorts.Add_Click({
+        try { $numInstCount = [int]$txtInst.Text } catch { $numInstCount = 1 }
+        $res = Show-PortConfigWindow -numInstances $numInstCount -currentPorts $Global:TempManualPorts
+        if ($res) { $Global:TempManualPorts = $res }
+    })
+
+    $UpdateMapMode = {
+        if ($rbAutoMap.Checked) {
+            $txtBasePort.Visible = $true
+            $btnConfigPorts.Visible = $false
+        } else {
+            $txtBasePort.Visible = $false
+            $btnConfigPorts.Visible = $true
+        }
+    }
+    $rbAutoMap.Add_CheckedChanged($UpdateMapMode)
+    $rbManMap.Add_CheckedChanged($UpdateMapMode)
+
+    if ($monitorData.portMappingMode -eq "Manual") { $rbManMap.Checked = $true } else { $rbAutoMap.Checked = $true }
+    & $UpdateMapMode
+
+    $lblGuilds = New-Object System.Windows.Forms.Label; $lblGuilds.Text = "Guild Restriction (IDs):"; $lblGuilds.Location = P 20 275; $lblGuilds.AutoSize = $true; $tabServer.Controls.Add($lblGuilds)
+    $txtGuilds = New-Object System.Windows.Forms.TextBox; $txtGuilds.Location = P 150 272; $txtGuilds.Size = S 230 20; $txtGuilds.Text = (Get-Guilds); $tabServer.Controls.Add($txtGuilds)
 
     # --- TAB 2: MONITOR SETTINGS ---
     $tabMonitor = New-Object System.Windows.Forms.TabPage
@@ -623,7 +794,10 @@ Function Show-ConfigWindow {
     $btnSave.Add_Click({
         try {
             if ([int]$txtInst.Text -lt 1) { throw "Invalid Instances" }
-            if ([int]$txtPort.Text -lt 1 -or [int]$txtPort.Text -gt 65535) { throw "Invalid Port" }
+            if ($rbAutoMap.Checked) {
+                if ([string]::IsNullOrWhiteSpace($txtBasePort.Text) -or $txtBasePort.Text -eq "Base Port") { throw "Invalid Port" }
+                if ([int]$txtBasePort.Text -lt 1 -or [int]$txtBasePort.Text -gt 65535) { throw "Invalid Port" }
+            }
             $null = [double]$txtCheck.Text
             $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
             $form.Close()
@@ -634,7 +808,9 @@ Function Show-ConfigWindow {
 
     $btnRestore = New-Object System.Windows.Forms.Button; $btnRestore.Text = "Defaults"; $btnRestore.Location = P 180 520; $btnRestore.Size = S 80 25; $form.Controls.Add($btnRestore)
     $btnRestore.Add_Click({
-        $txtInst.Text = "1"; $txtPort.Text = "6792"; $txtThreads.Text = "2"; $rbStd.Checked = $true
+        $txtInst.Text = "1"; $txtThreads.Text = "2"; $rbStd.Checked = $true
+        $rbAutoMap.Checked = $true; $txtBasePort.Text = "6792"
+        $txtGuilds.Text = ""; $Global:TempManualPorts = @()
         $txtArgs.Text = "-server -headless -noovr -fixedtimestep -nosymbollookup"
         $chkExitOnError.Checked = $true
         $txtCheck.Text = "5"; $chkStartup.Checked = $true; $chkArchive.Checked = $true
@@ -658,15 +834,30 @@ Function Show-ConfigWindow {
         # Check if any Server Settings were actually changed
         $serverSettingsChanged = $false
         if ($monitorData.amountOfInstances -ne $numInst) { $serverSettingsChanged = $true }
-        if ($monitorData.basePort -ne [int]$txtPort.Text) { $serverSettingsChanged = $true }
+        if ($rbAutoMap.Checked) {
+            if ($monitorData.portMappingMode -ne "Automatic") { $serverSettingsChanged = $true }
+            if ($monitorData.basePort -ne [int]$txtBasePort.Text) { $serverSettingsChanged = $true }
+            $monitorData.portMappingMode = "Automatic"
+            $monitorData.basePort = [int]$txtBasePort.Text
+        } else {
+            if ($monitorData.portMappingMode -ne "Manual") { $serverSettingsChanged = $true }
+            # Full array comparison could be complex, assume changed for safety if manual was just configured
+            $serverSettingsChanged = $true 
+            $monitorData.portMappingMode = "Manual"
+            $monitorData.manualPortArray = $Global:TempManualPorts
+        }
+
         if ($monitorData.numTaskThreads -ne [int]$txtThreads.Text) { $serverSettingsChanged = $true }
         if ($monitorData.timeStep -ne $tStep) { $serverSettingsChanged = $true }
         if ($monitorData.additionalArgs -ne $txtArgs.Text) { $serverSettingsChanged = $true }
         if ($monitorData.enableApi -ne $chkApi.Checked) { $serverSettingsChanged = $true }
         if ($monitorData.exitOnError -ne $chkExitOnError.Checked) { $serverSettingsChanged = $true }
 
+        # Guild check is separate from instance re-spawns usually, but it modifies config.json
+        $oldGuilds = Get-Guilds
+        if ($oldGuilds -ne $txtGuilds.Text) { Set-Guilds $txtGuilds.Text; $serverSettingsChanged = $true }
+
         $monitorData.amountOfInstances = $numInst
-        $monitorData.basePort = [int]$txtPort.Text
         $monitorData.delayProcessCheck = [int]([double]$txtCheck.Text * 1000)
         $monitorData.numTaskThreads = [int]$txtThreads.Text
         $monitorData.timeStep = $tStep
@@ -683,7 +874,7 @@ Function Show-ConfigWindow {
         $monitorData.trayPid = $chkTrayPid.Checked; $monitorData.trayPorts = $chkTrayPorts.Checked; $monitorData.trayLobby = $chkTrayLobby.Checked; $monitorData.trayPlayers = $chkTrayPlayers.Checked; $monitorData.trayUptime = $chkTrayUptime.Checked
         $monitorData.touchFriendly = $chkTouch.Checked
 
-        $Global:BasePort = $monitorData.basePort
+        if ($rbAutoMap.Checked) { $Global:BasePort = $monitorData.basePort }
 
         Switch-StartupShortcut $chkStartup.Checked
         Set-ApiAccess $monitorData.enableApi
@@ -717,6 +908,23 @@ Function Get-AvailablePortPair {
     for ($i = 0; $i -lt 100; $i++) {
         $gsPort = $Global:BasePort + ($i * 2)
         $apiPort = $gsPort + 1
+        $inUse = $false
+        foreach ($pidKey in $Global:PortMap.Keys) {
+            $entry = $Global:PortMap[$pidKey]
+            if ($entry.GS -eq $gsPort -or $entry.API -eq $apiPort) { $inUse = $true; break }
+        }
+        if (-not $inUse) { return @{ GS=$gsPort; API=$apiPort } }
+    }
+    return $null
+}
+
+Function Get-ManualPortPair {
+    $conf = Get-MonitorConfig
+    $manualPorts = $conf.manualPortArray
+    if ($null -eq $manualPorts) { return $null }
+    for ($i = 0; $i -lt $manualPorts.Count; $i++) {
+        $gsPort = [int]$manualPorts[$i].GS
+        $apiPort = [int]$manualPorts[$i].API
         $inUse = $false
         foreach ($pidKey in $Global:PortMap.Keys) {
             $entry = $Global:PortMap[$pidKey]
@@ -863,7 +1071,10 @@ $MonitorTimer.Interval = 3000
 $MonitorAction = {
     $config = Get-MonitorConfig
     $MonitorTimer.Interval = $config.delayProcessCheck
-    $Global:BasePort = $config.basePort
+    
+    if ($config.portMappingMode -eq "Automatic") {
+        $Global:BasePort = $config.basePort
+    }
 
     $now = Get-Date
     $currentDay = $now.DayOfYear
@@ -1102,7 +1313,14 @@ $MonitorAction = {
         if ($needed -gt 0) {
             $freshConfig = Get-MonitorConfig
             if (-not $freshConfig.pauseSpawning -and -not $Global:LinkCodeActive) {
-                $portPair = Get-AvailablePortPair
+                
+                $portPair = $null
+                if ($freshConfig.portMappingMode -eq "Manual") {
+                    $portPair = Get-ManualPortPair
+                } else {
+                    $portPair = Get-AvailablePortPair
+                }
+
                 if ($null -ne $portPair) {
                     $exitArg = if ($config.exitOnError) { " -exitonerror" } else { "" }
                     $launchArgs = "-numtaskthreads $($config.numTaskThreads) -timestep $($config.timeStep) $($config.additionalArgs) -port $($portPair.GS) -httpport $($portPair.API)$exitArg"
