@@ -61,8 +61,8 @@ class EchoServerConfig(ctk.CTk):
         self.title("EchoVR Server Setup Tool")
  
         screen_height = self.winfo_screenheight()
-        default_width = 490
-        default_height = 840
+        default_width = 512
+        default_height = 930
 
         if screen_height < default_height:
             calc_height = int(screen_height * 0.8)
@@ -680,6 +680,7 @@ del "%~f0"
         discord_id = ""
         password = ""
         region_val = ""
+        guilds_val = ""
         cgnat_val = ""
         args_val = ""
         
@@ -696,6 +697,7 @@ del "%~f0"
                             if p.startswith("discordid="): discord_id = p.split("=", 1)[1]
                             elif p.startswith("password="): password = p.split("=", 1)[1]
                             elif p.startswith("regions="): region_val = p.split("=", 1)[1]
+                            elif p.startswith("guilds="): guilds_val = p.split("=", 1)[1]
                             elif p.startswith("serveraddr="): cgnat_val = p.split("=", 1)[1]
                             else: remaining_params.append(p)
                         if remaining_params: args_val = "&" + "&".join(remaining_params)
@@ -728,17 +730,23 @@ del "%~f0"
         entry_pass.pack(anchor="w")
         ctk.CTkLabel(form_frame, text="Do not use a password you typically use.", font=("Arial", 11), text_color="gray").pack(anchor="w", pady=(0, 5))
 
-        ctk.CTkLabel(form_frame, text="Region ID").pack(anchor="w")
+        ctk.CTkLabel(form_frame, text="Region ID (Optional)").pack(anchor="w")
         entry_region = ctk.CTkEntry(form_frame, width=400)
         entry_region.insert(0, region_val)
         entry_region.pack(anchor="w")
         ctk.CTkLabel(form_frame, text="Leave blank unless otherwise instructed. Separate multiple IDs with commas.", font=("Arial", 11), text_color="gray").pack(anchor="w", pady=(0, 5))
 
+        ctk.CTkLabel(form_frame, text="Guild Restrictions (Optional)").pack(anchor="w")
+        entry_guilds = ctk.CTkEntry(form_frame, width=400)
+        entry_guilds.insert(0, guilds_val)
+        entry_guilds.pack(anchor="w")
+        ctk.CTkLabel(form_frame, text="Discord server ID(s) to restrict hosting to, separated by commas. Leave blank for no restriction.", font=("Arial", 11), text_color="gray").pack(anchor="w", pady=(0, 5))
+
         ctk.CTkLabel(form_frame, text="Tunnel IP:Port").pack(anchor="w")
         entry_cgnat = ctk.CTkEntry(form_frame, width=400)
         entry_cgnat.insert(0, cgnat_val)
         entry_cgnat.pack(anchor="w")
-        ctk.CTkLabel(form_frame, text="Required for hosts behind a CGNAT, optional otherwise.", font=("Arial", 11), text_color="gray").pack(anchor="w", pady=(0, 5))
+        ctk.CTkLabel(form_frame, text="Required for hosts using a tunnel service.", font=("Arial", 11), text_color="gray").pack(anchor="w", pady=(0, 5))
 
         ctk.CTkLabel(form_frame, text="Additional Arguments").pack(anchor="w")
         entry_args = ctk.CTkEntry(form_frame, width=400)
@@ -780,6 +788,7 @@ del "%~f0"
             pwd = entry_pass.get()
             base_serverdb = f"ws://g.echovrce.com:80/serverdb?discordid={did}&password={pwd}"
             if entry_region.get(): base_serverdb += f"&regions={entry_region.get()}"
+            if entry_guilds.get(): base_serverdb += f"&guilds={entry_guilds.get()}"
             if entry_cgnat.get(): base_serverdb += f"&serveraddr={entry_cgnat.get()}"
             if entry_args.get(): base_serverdb += f"{entry_args.get()}"
 
