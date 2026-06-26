@@ -13,3 +13,6 @@ Otherwise, follow the [setup guide](https://github.com/EchoTools/EchoVR-Windows-
 ## Already a host?
 Download the latest server monitor from [releases](https://github.com/EchoTools/EchoVR-Windows-Hosts-Resources/releases).
 <br>Give the [usage guide](https://github.com/EchoTools/EchoVR-Windows-Hosts-Resources/wiki/Usage-Guide#server-monitor-usage) a quick skim before starting.
+
+> [!TIP]
+> If your monitor is failing to launch, delete the `\ready-at-dawn-echo-arena\dashboard` folder and retry.
