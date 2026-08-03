@@ -5,14 +5,14 @@
 ###################################################################
 
 # Changes 
+# v5.3.0 - Added dynamic timestep option and disables quickedit for echo instances. Adds instance kill condition options (to reenable log parsing if needed). 
 # v5.2.0 - Added Manual Port Mapping and Guild Restriction, adds EnableVisualStyles for a cleaner look.
 # v5.1.2 - Exposed -exitonerror launch argument in the Server Settings tab.
-# v5.1.1 - Minor UI changes for better wording. Makes DLL auto-updates queue shutdown, monitor actually auto-updates at midnight instead of every 24h. Adds last update check indicator in About tab.
 
 # ==============================================================================
 # GLOBAL SETTINGS
 # ==============================================================================
-$Global:Version = "5.2.0"
+$Global:Version = "5.3.0"
 $Global:GithubOwner = "EchoTools"
 $Global:GithubRepo  = "EchoVR-Windows-Hosts-Resources"
 
@@ -24,6 +24,22 @@ $portalURL = "https://echovrce.com/"
 # DLL Hash Targets (MD5)
 $Global:Hash_PNSRAD = "67E6E9B3BE315EA784D69E5A31815B89"
 $Global:Hash_DBGCORE = "7E7998C29A1E588AF659E19C3DD27265"
+
+# Target Log Errors for Termination
+$Global:TargetLogErrors = @(
+    "Unable to find MiniDumpWriteDump", 
+    "[NETGAME] Service status request failed: 400 Bad Request", 
+    "[NETGAME] Service status request failed: 404 Not Found", 
+    "[TCP CLIENT] [R14NETCLIENT] connection to ws:///login", 
+    "[TCP CLIENT] [R14NETCLIENT] connection to failed", 
+    "[TCP CLIENT] [R14NETCLIENT] connection to established", 
+    "[TCP CLIENT] [R14NETCLIENT] connection to restored", 
+    "[TCP CLIENT] [R14NETCLIENT] connection to closed", 
+    "[TCP CLIENT] [R14NETCLIENT] Lost connection (okay) to peer", 
+    "[NETGAME] Service status request failed: 502 Bad Gateway", 
+    "[NETGAME] Service status request failed: 0 Unknown",
+    "Console close signal received"
+)
 
 # Update Parameters
 $Global:PendingSilentDLLUpdate = $false
@@ -270,8 +286,9 @@ Function Get-MonitorConfig {
         delayProcessCheck = 5000
         numTaskThreads = 2
         timeStep = 120
-        additionalArgs = "-server -headless -noovr -fixedtimestep -nosymbollookup"
-        exitOnError = $true
+        additionalArgs = "-server -headless -noovr -nosymbollookup"
+        killCondition = "ExitOnError"
+        startupGracePeriod = 30
         suppressSetupWarning = $false
         autoUpdate = $true
         updateInterval = "Daily"
@@ -299,6 +316,20 @@ Function Get-MonitorConfig {
     
     $config = Get-Content $MonitorFile -Raw | ConvertFrom-Json
     $saveNeeded = $false
+
+    # Handle migration from exitOnError boolean to killCondition string
+    if ($null -ne $config.exitOnError -and $null -eq $config.killCondition) {
+        $migratedMode = if ($config.exitOnError) { "ExitOnError" } else { "CheckLogs" }
+        $config | Add-Member -MemberType NoteProperty -Name "killCondition" -Value $migratedMode -Force
+        $saveNeeded = $true
+    }
+
+    # Clean legacy -fixedtimestep from additionalArgs
+    if ($null -ne $config.additionalArgs -and $config.additionalArgs -match "(?i)-fixedtimestep") {
+        $config.additionalArgs = ($config.additionalArgs -ireplace "-fixedtimestep", "") -replace "\s+", " "
+        $config.additionalArgs = $config.additionalArgs.Trim()
+        $saveNeeded = $true
+    }
 
     foreach ($key in $defaultConfig.Keys) {
         if ($null -eq $config.$key) { 
@@ -584,18 +615,22 @@ Function Show-ConfigWindow {
     $lblThreads = New-Object System.Windows.Forms.Label; $lblThreads.Text = "Max Threads per Instance:"; $lblThreads.Location = P 20 60; $lblThreads.AutoSize = $true; $tabServer.Controls.Add($lblThreads)
     $txtThreads = New-Object System.Windows.Forms.TextBox; $txtThreads.Location = P 250 57; $txtThreads.Size = S 120 20; $txtThreads.Text = "$($monitorData.numTaskThreads)"; $tabServer.Controls.Add($txtThreads)
 
-    $lblTime = New-Object System.Windows.Forms.Label; $lblTime.Text = "Server Timestep:"; $lblTime.Location = P 20 95; $lblTime.AutoSize = $true; $tabServer.Controls.Add($lblTime)
+    $lblTime = New-Object System.Windows.Forms.Label; $lblTime.Text = "Timestep:"; $lblTime.Location = P 20 95; $lblTime.AutoSize = $true; $tabServer.Controls.Add($lblTime)
 
-    $rbStd = New-Object System.Windows.Forms.RadioButton; $rbStd.Text = "Standard (120)"; $rbStd.Location = P 150 93; $rbStd.AutoSize = $true; $tabServer.Controls.Add($rbStd)
-    $rbComp = New-Object System.Windows.Forms.RadioButton; $rbComp.Text = "Competitive (180)"; $rbComp.Location = P 260 93; $rbComp.AutoSize = $true; $tabServer.Controls.Add($rbComp)
-    if ($monitorData.timeStep -eq 180) { $rbComp.Checked = $true } else { $rbStd.Checked = $true }
+    $rbStd = New-Object System.Windows.Forms.RadioButton; $rbStd.Text = "Standard (120)"; $rbStd.Location = P 95 93; $rbStd.AutoSize = $true; $tabServer.Controls.Add($rbStd)
+    $rbComp = New-Object System.Windows.Forms.RadioButton; $rbComp.Text = "Competitive (180)"; $rbComp.Location = P 205 93; $rbComp.AutoSize = $true; $tabServer.Controls.Add($rbComp)
+    $rbDyn = New-Object System.Windows.Forms.RadioButton; $rbDyn.Text = "Dynamic"; $rbDyn.Location = P 330 93; $rbDyn.AutoSize = $true; $tabServer.Controls.Add($rbDyn)
+    if ($monitorData.timeStep -eq 180) { $rbComp.Checked = $true } elseif ($monitorData.timeStep -eq 120) { $rbStd.Checked = $true } else {$rbDyn.Checked = $true}
 
     $lblArgs = New-Object System.Windows.Forms.Label; $lblArgs.Text = "Additional Args:"; $lblArgs.Location = P 20 130; $lblArgs.AutoSize = $true; $tabServer.Controls.Add($lblArgs)
     $txtArgs = New-Object System.Windows.Forms.TextBox; $txtArgs.Location = P 20 150; $txtArgs.Size = S 380 20; $txtArgs.Text = "$($monitorData.additionalArgs)"; $tabServer.Controls.Add($txtArgs)
 
     $chkApi = New-Object System.Windows.Forms.CheckBox; $chkApi.Text = "Enable EchoVR API"; $chkApi.Location = P 20 185; $chkApi.AutoSize = $true; $chkApi.Checked = $monitorData.enableApi; $tabServer.Controls.Add($chkApi)
 
-    $chkExitOnError = New-Object System.Windows.Forms.CheckBox; $chkExitOnError.Text = "Automatically Restart Instances (-exitonerror)"; $chkExitOnError.Location = P 20 210; $chkExitOnError.AutoSize = $true; $chkExitOnError.Checked = $monitorData.exitOnError; $tabServer.Controls.Add($chkExitOnError)
+    $pnlKillMode = New-Object System.Windows.Forms.Panel; $pnlKillMode.Location = P 15 208; $pnlKillMode.Size = S 400 30; $tabServer.Controls.Add($pnlKillMode)
+    $rbKillExit = New-Object System.Windows.Forms.RadioButton; $rbKillExit.Text = "Wait for crash (-exitonerror)"; $rbKillExit.Location = P 5 3; $rbKillExit.AutoSize = $true; $pnlKillMode.Controls.Add($rbKillExit)
+    $rbKillLog = New-Object System.Windows.Forms.RadioButton; $rbKillLog.Text = "Check logs for errors"; $rbKillLog.Location = P 200 3; $rbKillLog.AutoSize = $true; $pnlKillMode.Controls.Add($rbKillLog)
+    if ($monitorData.killCondition -eq "CheckLogs") { $rbKillLog.Checked = $true } else { $rbKillExit.Checked = $true }
 
     $lblPortMap = New-Object System.Windows.Forms.Label; $lblPortMap.Text = "Port Mapping:"; $lblPortMap.Location = P 20 240; $lblPortMap.AutoSize = $true; $tabServer.Controls.Add($lblPortMap)
     
@@ -811,8 +846,8 @@ Function Show-ConfigWindow {
         $txtInst.Text = "1"; $txtThreads.Text = "2"; $rbStd.Checked = $true
         $rbAutoMap.Checked = $true; $txtBasePort.Text = "6792"
         $txtGuilds.Text = ""; $Global:TempManualPorts = @()
-        $txtArgs.Text = "-server -headless -noovr -fixedtimestep -nosymbollookup"
-        $chkExitOnError.Checked = $true
+        $txtArgs.Text = "-server -headless -noovr -nosymbollookup"
+        $rbKillExit.Checked = $true
         $txtCheck.Text = "5"; $chkStartup.Checked = $true; $chkArchive.Checked = $true
         $chkPurge.Checked = $false; $cmbPurge.SelectedItem = "Weekly"
         $chkAutoUpdate.Checked = $true; $cmbUpdate.SelectedItem = "Daily"
@@ -829,7 +864,7 @@ Function Show-ConfigWindow {
 
     if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         $numInst = [int]$txtInst.Text
-        $tStep = if ($rbComp.Checked) { 180 } else { 120 }
+        $tStep = if ($rbComp.Checked) { 180 } elseif ($rbStd.Checked) { 120 } else { 0 }
         
         # Check if any Server Settings were actually changed
         $serverSettingsChanged = $false
@@ -847,11 +882,13 @@ Function Show-ConfigWindow {
             $monitorData.manualPortArray = $Global:TempManualPorts
         }
 
+        $newKillCondition = if ($rbKillExit.Checked) { "ExitOnError" } else { "CheckLogs" }
+        if ($monitorData.killCondition -ne $newKillCondition) { $serverSettingsChanged = $true }
+
         if ($monitorData.numTaskThreads -ne [int]$txtThreads.Text) { $serverSettingsChanged = $true }
         if ($monitorData.timeStep -ne $tStep) { $serverSettingsChanged = $true }
         if ($monitorData.additionalArgs -ne $txtArgs.Text) { $serverSettingsChanged = $true }
         if ($monitorData.enableApi -ne $chkApi.Checked) { $serverSettingsChanged = $true }
-        if ($monitorData.exitOnError -ne $chkExitOnError.Checked) { $serverSettingsChanged = $true }
 
         # Guild check is separate from instance re-spawns usually, but it modifies config.json
         $oldGuilds = Get-Guilds
@@ -862,7 +899,7 @@ Function Show-ConfigWindow {
         $monitorData.numTaskThreads = [int]$txtThreads.Text
         $monitorData.timeStep = $tStep
         $monitorData.additionalArgs = $txtArgs.Text
-        $monitorData.exitOnError = $chkExitOnError.Checked
+        $monitorData.killCondition = $newKillCondition
         $monitorData.autoUpdate = $chkAutoUpdate.Checked
         $monitorData.updateInterval = $cmbUpdate.SelectedItem
         $monitorData.autoArchive = $chkArchive.Checked
@@ -1096,8 +1133,10 @@ $MonitorAction = {
 
     $trackedPids = @($Global:PortMap.Keys)
     foreach ($pidKey in $trackedPids) {
-        if ($runningIds -notcontains $pidKey) { $Global:PortMap.Remove($pidKey) }
-        $Global:NotifiedPids.Remove($pidKey)
+        if ($runningIds -notcontains $pidKey) { 
+            $Global:PortMap.Remove($pidKey) 
+            $Global:NotifiedPids.Remove($pidKey)
+        }
     }
 
     $canSoftShutdown = ($config.enableApi -and $config.allowMonitorApi)
@@ -1117,7 +1156,7 @@ $MonitorAction = {
                 }
             }
 
-            # 2. Log Parsing (Kept specifically for pulling Link Codes on initial start)
+            # 2. Log Parsing
             if ($null -eq $pData.LogPath -or -not (Test-Path -LiteralPath $pData.LogPath)) {
                 $logFile = Get-ChildItem -Path $LogPath -Filter "*_$($proc.Id).log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
                 if ($logFile) { $pData.LogPath = $logFile.FullName }
@@ -1139,6 +1178,28 @@ $MonitorAction = {
                                 $bytes = [System.Text.Encoding]::Unicode.GetBytes($cmd)
                                 $encodedCommand = [Convert]::ToBase64String($bytes)
                                 Start-Process -FilePath "powershell.exe" -ArgumentList "-WindowStyle Hidden", "-EncodedCommand $encodedCommand" -WindowStyle Hidden
+                            }
+                        }
+                    }
+
+                    # Check Logs for targeted instance termination
+                    if ($config.killCondition -eq "CheckLogs") {
+                        try {
+                            $uptimeSeconds = ($now - $proc.StartTime).TotalSeconds
+                        } catch {
+                            $uptimeSeconds = 999 # Fallback if StartTime is blocked
+                        }
+
+                        if ($uptimeSeconds -gt $config.startupGracePeriod) {
+                            foreach ($line in $lines) {
+                                if ($line.Length -ge 25) {
+                                    $line_clean = $line.Substring(25) -replace "[0-9]*\.[0-9]*\.[0-9]*\.[0-9]*:[0-9]*", "" -replace "ws://.* ", "" -replace " ws://.*api_key=.*",""  -replace "\?auth=.*", ""
+                                    if ($Global:TargetLogErrors -contains $line_clean) {
+                                        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+                                        $Global:PortMap.Remove($proc.Id)
+                                        break # Skip evaluating remaining lines for this instance
+                                    }
+                                }
                             }
                         }
                     }
@@ -1322,8 +1383,17 @@ $MonitorAction = {
                 }
 
                 if ($null -ne $portPair) {
-                    $exitArg = if ($config.exitOnError) { " -exitonerror" } else { "" }
-                    $launchArgs = "-numtaskthreads $($config.numTaskThreads) -timestep $($config.timeStep) $($config.additionalArgs) -port $($portPair.GS) -httpport $($portPair.API)$exitArg"
+                    $exitArg = if ($config.killCondition -eq "ExitOnError") { " -exitonerror" } else { "" }
+                    $timeStepArg = if ($config.timeStep -ne 0) { "-fixedtimestep -timestep $($config.timeStep) " } else { "" }
+                    $launchArgs = "-numtaskthreads $($config.numTaskThreads) $timeStepArg$($config.additionalArgs) -port $($portPair.GS) -httpport $($portPair.API)$exitArg"
+                    
+                    # Create a persistent rule in Windows to disable QuickEdit ONLY for this specific server executable
+                    $consoleSubKey = $EchoExePath -replace '\\', '_'
+                    $appRegPath = "HKCU:\Console\$consoleSubKey"
+                    
+                    if (-not (Test-Path $appRegPath)) { New-Item -Path $appRegPath -Force | Out-Null }
+                    Set-ItemProperty -Path $appRegPath -Name "QuickEdit" -Value 0 -Force
+                    
                     $newProc = Start-Process -FilePath $EchoExePath -ArgumentList $launchArgs -WindowStyle Minimized -PassThru
                     
                     if ($newProc) {
