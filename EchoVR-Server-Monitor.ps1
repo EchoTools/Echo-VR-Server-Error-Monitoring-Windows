@@ -4,15 +4,15 @@
 # Echo <3
 ###################################################################
 
-# Changes 
+# Changes
+# v5.4.0 - Addressed race condition between instance title update and shutdown evaluation. Adds option to auto-restart instances.
 # v5.3.0 - Added dynamic timestep option and disables quickedit for echo instances. Adds instance kill condition options (to reenable log parsing if needed). 
 # v5.2.0 - Added Manual Port Mapping and Guild Restriction, adds EnableVisualStyles for a cleaner look.
-# v5.1.2 - Exposed -exitonerror launch argument in the Server Settings tab.
 
 # ==============================================================================
 # GLOBAL SETTINGS
 # ==============================================================================
-$Global:Version = "5.3.0"
+$Global:Version = "5.4.0"
 $Global:GithubOwner = "EchoTools"
 $Global:GithubRepo  = "EchoVR-Windows-Hosts-Resources"
 
@@ -47,7 +47,7 @@ $Global:PendingMonitorUpdateUrl = $null
 $Global:SilentUpdatePreviousPauseState = $false
 
 # Port Management & Instance Tracking
-# Structure: @{ PID = @{ GS=1234; API=1235; LogPath="..."; ShutdownQueued=$false; PlayerCount=0; ... } }
+# Structure: @{ PID = @{ GS=1234; API=1235; LogPath="..."; ShutdownQueued=$false; PlayerCount=0; LastIdleStart=$null; ... } }
 $Global:PortMap = @{}
 $Global:NotifiedPids = @{}
 $Global:LinkCodeActive = $false
@@ -157,6 +157,7 @@ Function Import-PortMap {
                         ShutdownQueued = $false
                         PlayerCount = 0
                         ModeTitle = "Unknown Mode"
+                        LastIdleStart = $null
                     }
                 }
             }
@@ -299,6 +300,8 @@ Function Get-MonitorConfig {
         purgeInterval = "Weekly"
         enableApi = $true
         allowMonitorApi = $true
+        autoRestartIdle = $false
+        autoRestartTimeout = 15
         titlePid = $true; titlePorts = $true; titleLobby = $true; titlePlayers = $true; titleUptime = $true
         trayPid = $true; trayPorts = $true; trayLobby = $false; trayPlayers = $true; trayUptime = $true
         touchFriendly = $false
@@ -705,28 +708,32 @@ Function Show-ConfigWindow {
 
     $chkAllowMonitorApi = New-Object System.Windows.Forms.CheckBox; $chkAllowMonitorApi.Text = "Allow Monitor to use EchoVR API"; $chkAllowMonitorApi.Location = P 20 165; $chkAllowMonitorApi.AutoSize = $true; $chkAllowMonitorApi.Checked = $monitorData.allowMonitorApi; $tabMonitor.Controls.Add($chkAllowMonitorApi)
 
+    $chkAutoRestart = New-Object System.Windows.Forms.CheckBox; $chkAutoRestart.Text = "Idle Time until Auto-Restart (min):"; $chkAutoRestart.Location = P 20 195; $chkAutoRestart.AutoSize = $true; $chkAutoRestart.Checked = $monitorData.autoRestartIdle; $tabMonitor.Controls.Add($chkAutoRestart)
+    $txtAutoRestart = New-Object System.Windows.Forms.TextBox; $txtAutoRestart.Location = P 250 192; $txtAutoRestart.Size = S 120 20; $txtAutoRestart.Text = "$($monitorData.autoRestartTimeout)"; $txtAutoRestart.Enabled = $monitorData.autoRestartIdle; $tabMonitor.Controls.Add($txtAutoRestart)
+    $chkAutoRestart.Add_CheckedChanged({ $txtAutoRestart.Enabled = $chkAutoRestart.Checked })
+
     $telSize = if ($tf) { 10 } else { 8 }
-    $lblTelemetry = New-Object System.Windows.Forms.Label; $lblTelemetry.Text = "Telemetry Visibility:"; $lblTelemetry.Font = New-Object System.Drawing.Font("Arial", $telSize, [System.Drawing.FontStyle]::Bold); $lblTelemetry.Location = P 20 195; $lblTelemetry.AutoSize = $true; $tabMonitor.Controls.Add($lblTelemetry)
+    $lblTelemetry = New-Object System.Windows.Forms.Label; $lblTelemetry.Text = "Telemetry Visibility:"; $lblTelemetry.Font = New-Object System.Drawing.Font("Arial", $telSize, [System.Drawing.FontStyle]::Bold); $lblTelemetry.Location = P 20 225; $lblTelemetry.AutoSize = $true; $tabMonitor.Controls.Add($lblTelemetry)
 
-    $lblTitleCol = New-Object System.Windows.Forms.Label; $lblTitleCol.Text = "Window Title"; $lblTitleCol.Location = P 20 215; $lblTitleCol.AutoSize = $true; $tabMonitor.Controls.Add($lblTitleCol)
-    $lblTrayCol = New-Object System.Windows.Forms.Label; $lblTrayCol.Text = "System Tray"; $lblTrayCol.Location = P 170 215; $lblTrayCol.AutoSize = $true; $tabMonitor.Controls.Add($lblTrayCol)
+    $lblTitleCol = New-Object System.Windows.Forms.Label; $lblTitleCol.Text = "Window Title"; $lblTitleCol.Location = P 20 245; $lblTitleCol.AutoSize = $true; $tabMonitor.Controls.Add($lblTitleCol)
+    $lblTrayCol = New-Object System.Windows.Forms.Label; $lblTrayCol.Text = "System Tray"; $lblTrayCol.Location = P 170 245; $lblTrayCol.AutoSize = $true; $tabMonitor.Controls.Add($lblTrayCol)
 
-    $chkTitlePid = New-Object System.Windows.Forms.CheckBox; $chkTitlePid.Text = "PID"; $chkTitlePid.Location = P 20 240; $chkTitlePid.AutoSize = $true; $chkTitlePid.Checked = $monitorData.titlePid; $tabMonitor.Controls.Add($chkTitlePid)
-    $chkTrayPid = New-Object System.Windows.Forms.CheckBox; $chkTrayPid.Text = "PID"; $chkTrayPid.Location = P 170 240; $chkTrayPid.AutoSize = $true; $chkTrayPid.Checked = $monitorData.trayPid; $tabMonitor.Controls.Add($chkTrayPid)
+    $chkTitlePid = New-Object System.Windows.Forms.CheckBox; $chkTitlePid.Text = "PID"; $chkTitlePid.Location = P 20 270; $chkTitlePid.AutoSize = $true; $chkTitlePid.Checked = $monitorData.titlePid; $tabMonitor.Controls.Add($chkTitlePid)
+    $chkTrayPid = New-Object System.Windows.Forms.CheckBox; $chkTrayPid.Text = "PID"; $chkTrayPid.Location = P 170 270; $chkTrayPid.AutoSize = $true; $chkTrayPid.Checked = $monitorData.trayPid; $tabMonitor.Controls.Add($chkTrayPid)
 
-    $chkTitlePorts = New-Object System.Windows.Forms.CheckBox; $chkTitlePorts.Text = "Ports"; $chkTitlePorts.Location = P 20 265; $chkTitlePorts.AutoSize = $true; $chkTitlePorts.Checked = $monitorData.titlePorts; $tabMonitor.Controls.Add($chkTitlePorts)
-    $chkTrayPorts = New-Object System.Windows.Forms.CheckBox; $chkTrayPorts.Text = "Ports"; $chkTrayPorts.Location = P 170 265; $chkTrayPorts.AutoSize = $true; $chkTrayPorts.Checked = $monitorData.trayPorts; $tabMonitor.Controls.Add($chkTrayPorts)
+    $chkTitlePorts = New-Object System.Windows.Forms.CheckBox; $chkTitlePorts.Text = "Ports"; $chkTitlePorts.Location = P 20 295; $chkTitlePorts.AutoSize = $true; $chkTitlePorts.Checked = $monitorData.titlePorts; $tabMonitor.Controls.Add($chkTitlePorts)
+    $chkTrayPorts = New-Object System.Windows.Forms.CheckBox; $chkTrayPorts.Text = "Ports"; $chkTrayPorts.Location = P 170 295; $chkTrayPorts.AutoSize = $true; $chkTrayPorts.Checked = $monitorData.trayPorts; $tabMonitor.Controls.Add($chkTrayPorts)
 
-    $chkTitleLobby = New-Object System.Windows.Forms.CheckBox; $chkTitleLobby.Text = "Lobby Info"; $chkTitleLobby.Location = P 20 290; $chkTitleLobby.AutoSize = $true; $chkTitleLobby.Checked = $monitorData.titleLobby; $tabMonitor.Controls.Add($chkTitleLobby)
-    $chkTrayLobby = New-Object System.Windows.Forms.CheckBox; $chkTrayLobby.Text = "Lobby Info"; $chkTrayLobby.Location = P 170 290; $chkTrayLobby.AutoSize = $true; $chkTrayLobby.Checked = $monitorData.trayLobby; $tabMonitor.Controls.Add($chkTrayLobby)
+    $chkTitleLobby = New-Object System.Windows.Forms.CheckBox; $chkTitleLobby.Text = "Lobby Info"; $chkTitleLobby.Location = P 20 320; $chkTitleLobby.AutoSize = $true; $chkTitleLobby.Checked = $monitorData.titleLobby; $tabMonitor.Controls.Add($chkTitleLobby)
+    $chkTrayLobby = New-Object System.Windows.Forms.CheckBox; $chkTrayLobby.Text = "Lobby Info"; $chkTrayLobby.Location = P 170 320; $chkTrayLobby.AutoSize = $true; $chkTrayLobby.Checked = $monitorData.trayLobby; $tabMonitor.Controls.Add($chkTrayLobby)
 
-    $chkTitlePlayers = New-Object System.Windows.Forms.CheckBox; $chkTitlePlayers.Text = "Player Count"; $chkTitlePlayers.Location = P 20 315; $chkTitlePlayers.AutoSize = $true; $chkTitlePlayers.Checked = $monitorData.titlePlayers; $tabMonitor.Controls.Add($chkTitlePlayers)
-    $chkTrayPlayers = New-Object System.Windows.Forms.CheckBox; $chkTrayPlayers.Text = "Player Count"; $chkTrayPlayers.Location = P 170 315; $chkTrayPlayers.AutoSize = $true; $chkTrayPlayers.Checked = $monitorData.trayPlayers; $tabMonitor.Controls.Add($chkTrayPlayers)
+    $chkTitlePlayers = New-Object System.Windows.Forms.CheckBox; $chkTitlePlayers.Text = "Player Count"; $chkTitlePlayers.Location = P 20 345; $chkTitlePlayers.AutoSize = $true; $chkTitlePlayers.Checked = $monitorData.titlePlayers; $tabMonitor.Controls.Add($chkTitlePlayers)
+    $chkTrayPlayers = New-Object System.Windows.Forms.CheckBox; $chkTrayPlayers.Text = "Player Count"; $chkTrayPlayers.Location = P 170 345; $chkTrayPlayers.AutoSize = $true; $chkTrayPlayers.Checked = $monitorData.trayPlayers; $tabMonitor.Controls.Add($chkTrayPlayers)
 
-    $chkTitleUptime = New-Object System.Windows.Forms.CheckBox; $chkTitleUptime.Text = "Uptime"; $chkTitleUptime.Location = P 20 340; $chkTitleUptime.AutoSize = $true; $chkTitleUptime.Checked = $monitorData.titleUptime; $tabMonitor.Controls.Add($chkTitleUptime)
-    $chkTrayUptime = New-Object System.Windows.Forms.CheckBox; $chkTrayUptime.Text = "Uptime"; $chkTrayUptime.Location = P 170 340; $chkTrayUptime.AutoSize = $true; $chkTrayUptime.Checked = $monitorData.trayUptime; $tabMonitor.Controls.Add($chkTrayUptime)
+    $chkTitleUptime = New-Object System.Windows.Forms.CheckBox; $chkTitleUptime.Text = "Uptime"; $chkTitleUptime.Location = P 20 370; $chkTitleUptime.AutoSize = $true; $chkTitleUptime.Checked = $monitorData.titleUptime; $tabMonitor.Controls.Add($chkTitleUptime)
+    $chkTrayUptime = New-Object System.Windows.Forms.CheckBox; $chkTrayUptime.Text = "Uptime"; $chkTrayUptime.Location = P 170 370; $chkTrayUptime.AutoSize = $true; $chkTrayUptime.Checked = $monitorData.trayUptime; $tabMonitor.Controls.Add($chkTrayUptime)
 
-    $chkTouch = New-Object System.Windows.Forms.CheckBox; $chkTouch.Text = "Enable Touch-Friendly Interface"; $chkTouch.Location = P 20 375; $chkTouch.AutoSize = $true; $chkTouch.Checked = $monitorData.touchFriendly; $tabMonitor.Controls.Add($chkTouch)
+    $chkTouch = New-Object System.Windows.Forms.CheckBox; $chkTouch.Text = "Enable Touch-Friendly Interface"; $chkTouch.Location = P 20 405; $chkTouch.AutoSize = $true; $chkTouch.Checked = $monitorData.touchFriendly; $tabMonitor.Controls.Add($chkTouch)
 
     # Setup the logic specifically for the Monitor API Usage checkbox
     $chkAllowMonitorApi.Add_CheckedChanged({
@@ -834,6 +841,7 @@ Function Show-ConfigWindow {
                 if ([int]$txtBasePort.Text -lt 1 -or [int]$txtBasePort.Text -gt 65535) { throw "Invalid Port" }
             }
             $null = [double]$txtCheck.Text
+            if ($chkAutoRestart.Checked -and [int]$txtAutoRestart.Text -lt 1) { throw "Invalid Timeout" }
             $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
             $form.Close()
         } catch {
@@ -853,6 +861,7 @@ Function Show-ConfigWindow {
         $chkAutoUpdate.Checked = $true; $cmbUpdate.SelectedItem = "Daily"
         $chkApi.Checked = $true
         $chkAllowMonitorApi.Checked = $true
+        $chkAutoRestart.Checked = $false; $txtAutoRestart.Text = "15"
         $chkTitlePid.Checked = $true; $chkTitlePorts.Checked = $true; $chkTitleLobby.Checked = $true; $chkTitlePlayers.Checked = $true; $chkTitleUptime.Checked = $true
         $chkTrayPid.Checked = $true; $chkTrayPorts.Checked = $true; $chkTrayLobby.Checked = $false; $chkTrayPlayers.Checked = $true; $chkTrayUptime.Checked = $true
         $chkTouch.Checked = $false
@@ -907,6 +916,8 @@ Function Show-ConfigWindow {
         $monitorData.purgeInterval = $cmbPurge.SelectedItem
         $monitorData.enableApi = $chkApi.Checked
         $monitorData.allowMonitorApi = $chkAllowMonitorApi.Checked
+        $monitorData.autoRestartIdle = $chkAutoRestart.Checked
+        $monitorData.autoRestartTimeout = [int]$txtAutoRestart.Text
         $monitorData.titlePid = $chkTitlePid.Checked; $monitorData.titlePorts = $chkTitlePorts.Checked; $monitorData.titleLobby = $chkTitleLobby.Checked; $monitorData.titlePlayers = $chkTitlePlayers.Checked; $monitorData.titleUptime = $chkTitleUptime.Checked
         $monitorData.trayPid = $chkTrayPid.Checked; $monitorData.trayPorts = $chkTrayPorts.Checked; $monitorData.trayLobby = $chkTrayLobby.Checked; $monitorData.trayPlayers = $chkTrayPlayers.Checked; $monitorData.trayUptime = $chkTrayUptime.Checked
         $monitorData.touchFriendly = $chkTouch.Checked
@@ -1147,16 +1158,7 @@ $MonitorAction = {
             $pData = $Global:PortMap[$proc.Id]
             if ($null -eq $pData) { continue }
 
-            # 1. Soft Shutdown Evaluation
-            if ($pData.ShutdownQueued) {
-                if ($pData.ModeTitle -eq "Idle") {
-                    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-                    $Global:PortMap.Remove($proc.Id)
-                    continue
-                }
-            }
-
-            # 2. Log Parsing
+            # 1. Log Parsing
             if ($null -eq $pData.LogPath -or -not (Test-Path -LiteralPath $pData.LogPath)) {
                 $logFile = Get-ChildItem -Path $LogPath -Filter "*_$($proc.Id).log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
                 if ($logFile) { $pData.LogPath = $logFile.FullName }
@@ -1206,7 +1208,7 @@ $MonitorAction = {
                 }
             }
 
-            # 3. Synchronous Native API Polling
+            # 2. Synchronous Native API Polling
             if ($config.allowMonitorApi -and (Test-PortOpen $pData.API 100)) {
                 $jobRes = Get-EchoApiData $pData.API
                 
@@ -1274,6 +1276,31 @@ $MonitorAction = {
                     $pData.ModeTitle = $modeStrTitle; $pData.ModeTray = $modeStrTray
                     $pData.PlayersTitle = $pStrTitle; $pData.PlayersTray = $pStrTray
                     $pData.PlayerCount = $totalConnected
+                }
+            }
+
+            # 3. Soft Shutdown Evaluation & Idle Auto-Restart
+            if ($pData.ModeTitle -eq "Idle") {
+                # Start or continue the idle timer
+                if ($null -eq $pData.LastIdleStart) {
+                    $pData.LastIdleStart = $now
+                } elseif ($config.autoRestartIdle) {
+                    $idleTime = New-TimeSpan -Start $pData.LastIdleStart -End $now
+                    if ($idleTime.TotalMinutes -ge $config.autoRestartTimeout) {
+                        $pData.ShutdownQueued = $true
+                    }
+                }
+            } else {
+                # Clear idle timer if the server becomes active
+                $pData.LastIdleStart = $null
+            }
+
+            # Process Shutdown
+            if ($pData.ShutdownQueued) {
+                if ($pData.ModeTitle -eq "Idle") {
+                    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+                    $Global:PortMap.Remove($proc.Id)
+                    continue
                 }
             }
         }
@@ -1400,7 +1427,7 @@ $MonitorAction = {
                         $Global:PortMap[$newProc.Id] = @{
                             GS = $portPair.GS; API = $portPair.API
                             GS_Confirmed = $null; API_Confirmed = $null; LogPath = $null
-                            ShutdownQueued = $false; PlayerCount = 0; ModeTitle = "Unknown Mode"
+                            ShutdownQueued = $false; PlayerCount = 0; ModeTitle = "Unknown Mode"; LastIdleStart = $null
                         }
                     }
                 }
