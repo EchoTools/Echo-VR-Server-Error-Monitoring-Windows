@@ -1,13 +1,14 @@
 ###################################################################
-# Code by marshmallow_mia and now berg_
+# Code by marshmallow_mia and now largely berg_
 # Server monitor lives in the system tray :)
 # Echo <3
 ###################################################################
 
 # Changes
+# v5.5.0 - Added event logging option. Instance restart timer now queues shutdown only after continuous idle time. 
+#          Moved telemetry visibility config to a submenu. Monitor now also checks & updates power/sleep options on startup.
 # v5.4.0 - Addressed race condition between instance title update and shutdown evaluation. Adds option to auto-restart instances.
 # v5.3.0 - Added dynamic timestep option and disables quickedit for echo instances. Adds instance kill condition options (to reenable log parsing if needed). 
-# v5.2.0 - Added Manual Port Mapping and Guild Restriction, adds EnableVisualStyles for a cleaner look.
 
 # ==============================================================================
 # GLOBAL SETTINGS
@@ -47,7 +48,6 @@ $Global:PendingMonitorUpdateUrl = $null
 $Global:SilentUpdatePreviousPauseState = $false
 
 # Port Management & Instance Tracking
-# Structure: @{ PID = @{ GS=1234; API=1235; LogPath="..."; ShutdownQueued=$false; PlayerCount=0; LastIdleStart=$null; ... } }
 $Global:PortMap = @{}
 $Global:NotifiedPids = @{}
 $Global:LinkCodeActive = $false
@@ -125,19 +125,66 @@ if (-not (Test-Path $DashboardDir)) { New-Item -ItemType Directory -Path $Dashbo
 if (-not (Test-Path $LogPathOld)) { New-Item -ItemType Directory -Path $LogPathOld -Force | Out-Null }
 
 # ==============================================================================
-# 2. STATE PERSISTENCE & API TOGGLE
+# 2. LOGGING FRAMEWORK
+# ==============================================================================
+
+$Global:CurrentLogFile = $null
+
+Function Initialize-MonitorLog {
+    $conf = Get-MonitorConfig
+    if ($conf.enableMonitorLogging) {
+        # Explicitly use $Script: scope so WinForms events don't lose the variable
+        $logsDir = Join-Path $Script:DashboardDir "logs"
+        if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
+        
+        # Ensure it creates if null OR if the file was deleted while running
+        if ($null -eq $Global:CurrentLogFile -or -not (Test-Path $Global:CurrentLogFile)) {
+            $ts = Get-Date -Format "MM-dd-yyyy HH-mm-ss"
+            $Global:CurrentLogFile = Join-Path $logsDir "servermonitor-$($Global:Version) $ts.log"
+            Write-MonitorLog "Logging started"
+        }
+    } else {
+        $Global:CurrentLogFile = $null
+    }
+}
+
+Function Write-MonitorLog {
+    param([string]$Message, [int]$ProcId = 0, $pData = $null)
+    if (-not [string]::IsNullOrEmpty($Global:CurrentLogFile)) {
+        $ts = (Get-Date).ToString("MM-dd-yyyy HH:mm:ss")
+        $logLine = "[$ts]: $Message"
+        
+        if ($ProcId -gt 0 -and $null -ne $pData) {
+            $uptimeStr = "Unknown"
+            try {
+                $proc = Get-Process -Id $ProcId -ErrorAction SilentlyContinue
+                if ($proc) {
+                    $uptime = New-TimeSpan -Start $proc.StartTime -End (Get-Date)
+                    $uptimeStr = "$($uptime.Hours)h $($uptime.Minutes)m $($uptime.Seconds)s"
+                }
+            } catch {}
+            $logLine += " | PID: $ProcId, Ports: $($pData.GS)/$($pData.API), Mode: $($pData.ModeTitle), Players: $($pData.PlayerCount), Uptime: $uptimeStr"
+        }
+        try { Add-Content -Path $Global:CurrentLogFile -Value $logLine -Force } catch {}
+    }
+}
+
+# ==============================================================================
+# 3. STATE PERSISTENCE & API TOGGLE
 # ==============================================================================
 
 Function Save-PortMap {
     if (-not (Test-Path $TempDir)) { New-Item -ItemType Directory -Path $TempDir -Force | Out-Null }
     
-    # Pack Hashtable into a PSObject to bypass PS5.1 JSON serialization bugs
     $exportObj = New-Object PSObject
+    $portsStr = @()
     foreach ($key in $Global:PortMap.Keys) {
         $exportObj | Add-Member -MemberType NoteProperty -Name $key.ToString() -Value $Global:PortMap[$key]
+        $portsStr += "[$key, $($Global:PortMap[$key].GS), $($Global:PortMap[$key].API)]"
     }
     
     $exportObj | ConvertTo-Json -Depth 5 -Compress | Set-Content -Path $PortsFile -Force
+    Write-MonitorLog "Portmap exported. Data: $($portsStr -join ', ')"
 }
 
 Function Import-PortMap {
@@ -146,6 +193,7 @@ Function Import-PortMap {
             $raw = Get-Content $PortsFile -Raw
             if (-not [string]::IsNullOrWhiteSpace($raw)) {
                 $saved = $raw | ConvertFrom-Json
+                $portsStr = @()
                 foreach ($prop in $saved.psobject.properties) {
                     $pidInt = [int]$prop.Name
                     $Global:PortMap[$pidInt] = @{
@@ -157,9 +205,12 @@ Function Import-PortMap {
                         ShutdownQueued = $false
                         PlayerCount = 0
                         ModeTitle = "Unknown Mode"
+                        PreviousMode = "Unknown Mode"
                         LastIdleStart = $null
                     }
+                    $portsStr += "[$pidInt, $($prop.Value.GS), $($prop.Value.API)]"
                 }
+                Write-MonitorLog "Portmap imported. Data: $($portsStr -join ', ')"
             }
             Remove-Item $PortsFile -Force
         } catch {}
@@ -167,13 +218,11 @@ Function Import-PortMap {
 }
 
 Function Set-ApiAccess ($enable) {
-    # 1. Update menu_settings.json
     $r14MenuPath = Join-Path $ScriptRoot "sourcedb\rad15\json\r14\config\uisettings\menu_settings.json"
     if (Test-Path $r14MenuPath) {
         try {
             $json = Get-Content $r14MenuPath -Raw | ConvertFrom-Json
             $needsSave = $false
-            
             if ($null -ne $json.pages) {
                 foreach ($page in $json.pages) {
                     if ($null -ne $page.rows) {
@@ -186,34 +235,24 @@ Function Set-ApiAccess ($enable) {
                     }
                 }
             }
-            
-            if ($needsSave) { 
-                $json | ConvertTo-Json -Depth 10 | Set-Content $r14MenuPath 
-            }
-        } catch { 
-            Write-Warning "Could not update menu_settings.json" 
-        }
+            if ($needsSave) { $json | ConvertTo-Json -Depth 10 | Set-Content $r14MenuPath }
+        } catch { Write-Warning "Could not update menu_settings.json" }
     }
     
-    # 2. Update settings_mp_v2.json
     $leConfig = Join-Path $env:LOCALAPPDATA "rad\loneecho\settings_mp_v2.json"
     if (Test-Path $leConfig) {
         try {
             $json2 = Get-Content $leConfig -Raw | ConvertFrom-Json
-            
             if ($null -ne $json2.game) {
                 if ($json2.game.EnableAPIAccess -ne $enable) {
                     $json2.game.EnableAPIAccess = [bool]$enable
                     $json2 | ConvertTo-Json -Depth 10 | Set-Content $leConfig
                 }
             }
-        } catch { 
-            Write-Warning "Could not update settings_mp_v2.json" 
-        }
+        } catch { Write-Warning "Could not update settings_mp_v2.json" }
     }
 }
 
-# Cleans the netconfig json files to allow them to actually be parsed, and sets retries to 50
 Function Repair-NetConfigFiles {
     $ConfigDir = Join-Path $ScriptRoot "sourcedb\rad15\json\r14\config"
     $TargetFiles = @("netconfig_client.json", "netconfig_dedicatedserver.json", "netconfig_lanserver.json", "netconfig_localserver.json")
@@ -235,13 +274,33 @@ Function Repair-NetConfigFiles {
     }
 }
 
+Function Update-PowerSettingsToNever {
+    # Combine output arrays into single strings so -match properly populates $Matches
+    $sleepQ = (powercfg /q SCHEME_CURRENT SUB_SLEEP STANDBYIDLE) -join "`n"
+    $videoQ = (powercfg /q SCHEME_CURRENT SUB_VIDEO VIDEOIDLE) -join "`n"
+    
+    $needsChange = $false
+    
+    # Check AC (Plugged in) and DC (Battery) for both Sleep and Display
+    if ($sleepQ -match "Current AC Power Setting Index: (0x[0-9A-Fa-f]+)" -and [int]$Matches[1] -ne 0) { $needsChange = $true }
+    if ($sleepQ -match "Current DC Power Setting Index: (0x[0-9A-Fa-f]+)" -and [int]$Matches[1] -ne 0) { $needsChange = $true }
+    if ($videoQ -match "Current AC Power Setting Index: (0x[0-9A-Fa-f]+)" -and [int]$Matches[1] -ne 0) { $needsChange = $true }
+    if ($videoQ -match "Current DC Power Setting Index: (0x[0-9A-Fa-f]+)" -and [int]$Matches[1] -ne 0) { $needsChange = $true }
+    
+    if ($needsChange) {
+        powercfg -change -standby-timeout-ac 0
+        powercfg -change -standby-timeout-dc 0
+        powercfg -change -monitor-timeout-ac 0
+        powercfg -change -monitor-timeout-dc 0
+        Write-MonitorLog "Power settings updated: Sleep and Display timeouts set to Never"
+    }
+}
+
 Function Get-Guilds {
     if (Test-Path $LocalConfigPath) {
         try {
             $c = Get-Content $LocalConfigPath -Raw | ConvertFrom-Json
-            if ($c.serverdb_host -match "&guilds=([0-9,]+)") {
-                return $Matches[1]
-            }
+            if ($c.serverdb_host -match "&guilds=([0-9,]+)") { return $Matches[1] }
         } catch {}
     }
     return ""
@@ -254,15 +313,10 @@ Function Set-Guilds ($guildsStr) {
             if ($null -ne $c.serverdb_host) {
                 $hostStr = $c.serverdb_host
                 if ($hostStr -match "&guilds=[0-9,]+") {
-                    if ([string]::IsNullOrWhiteSpace($guildsStr)) {
-                        $hostStr = $hostStr -replace "&guilds=[0-9,]+", ""
-                    } else {
-                        $hostStr = $hostStr -replace "&guilds=[0-9,]+", "&guilds=$guildsStr"
-                    }
+                    if ([string]::IsNullOrWhiteSpace($guildsStr)) { $hostStr = $hostStr -replace "&guilds=[0-9,]+", "" } 
+                    else { $hostStr = $hostStr -replace "&guilds=[0-9,]+", "&guilds=$guildsStr" }
                 } else {
-                    if (-not [string]::IsNullOrWhiteSpace($guildsStr)) {
-                        $hostStr += "&guilds=$guildsStr"
-                    }
+                    if (-not [string]::IsNullOrWhiteSpace($guildsStr)) { $hostStr += "&guilds=$guildsStr" }
                 }
                 $c.serverdb_host = $hostStr
                 $c | ConvertTo-Json -Depth 10 | Set-Content $LocalConfigPath
@@ -271,11 +325,8 @@ Function Set-Guilds ($guildsStr) {
     }
 }
 
-Import-PortMap
-Repair-NetConfigFiles
-
 # ==============================================================================
-# 3. CONFIGURATION MANAGEMENT
+# 4. CONFIGURATION MANAGEMENT
 # ==============================================================================
 
 Function Get-MonitorConfig {
@@ -302,6 +353,7 @@ Function Get-MonitorConfig {
         allowMonitorApi = $true
         autoRestartIdle = $false
         autoRestartTimeout = 15
+        enableMonitorLogging = $false
         titlePid = $true; titlePorts = $true; titleLobby = $true; titlePlayers = $true; titleUptime = $true
         trayPid = $true; trayPorts = $true; trayLobby = $false; trayPlayers = $true; trayUptime = $true
         touchFriendly = $false
@@ -320,14 +372,12 @@ Function Get-MonitorConfig {
     $config = Get-Content $MonitorFile -Raw | ConvertFrom-Json
     $saveNeeded = $false
 
-    # Handle migration from exitOnError boolean to killCondition string
     if ($null -ne $config.exitOnError -and $null -eq $config.killCondition) {
         $migratedMode = if ($config.exitOnError) { "ExitOnError" } else { "CheckLogs" }
         $config | Add-Member -MemberType NoteProperty -Name "killCondition" -Value $migratedMode -Force
         $saveNeeded = $true
     }
 
-    # Clean legacy -fixedtimestep from additionalArgs
     if ($null -ne $config.additionalArgs -and $config.additionalArgs -match "(?i)-fixedtimestep") {
         $config.additionalArgs = ($config.additionalArgs -ireplace "-fixedtimestep", "") -replace "\s+", " "
         $config.additionalArgs = $config.additionalArgs.Trim()
@@ -351,22 +401,10 @@ Function Save-MonitorConfig ($configObj) {
 
 Function Test-ShouldRunAutoUpdate ($configObj, $now = (Get-Date)) {
     if (-not $configObj.autoUpdate) { return $false }
-
     $daysToWait = switch ($configObj.updateInterval) {
-        "Daily" { 1 }
-        "Weekly" { 7 }
-        "Monthly" { 30 }
-        default { 7 }
+        "Daily" { 1 } "Weekly" { 7 } "Monthly" { 30 } default { 7 }
     }
-
-    try {
-        $lastCheck = [datetime]$configObj.lastUpdateCheckDate
-    } catch {
-        return $true
-    }
-
-    # Use local calendar dates so checks happen after local midnight boundaries,
-    # not after a rolling 24-hour window.
+    try { $lastCheck = [datetime]$configObj.lastUpdateCheckDate } catch { return $true }
     return ($now.Date -ge $lastCheck.Date.AddDays($daysToWait))
 }
 
@@ -403,20 +441,22 @@ Function Switch-StartupShortcut ($enable) {
     }
 }
 
+# Initialization block (Order-sensitive)
 $initConfig = Get-MonitorConfig
 $Global:BasePort = $initConfig.basePort
 Set-ApiAccess $initConfig.enableApi
+Initialize-MonitorLog
+Update-PowerSettingsToNever
+Import-PortMap
+Repair-NetConfigFiles
 
 # ==============================================================================
-# 4. LOG MAINTENANCE LOGIC
+# 5. LOG MAINTENANCE LOGIC
 # ==============================================================================
 
 Function Invoke-LogMaintenance {
     param([switch]$ManualArchive, [switch]$ManualPurge)
-    
-    # Clean up any completed jobs to prevent memory leaks
     Get-Job -State Completed | Remove-Job -ErrorAction SilentlyContinue
-
     $runningJobs = Get-Job -Name "LogMaintenance_Manual", "LogMaintenance_Auto" -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Running' }
     if ($runningJobs) { return }
 
@@ -459,7 +499,6 @@ Function Invoke-LogMaintenance {
         if ($IsManualPurge -or (-not $IsManual -and $jobConfig.autoPurge)) {
             $daysToKeep = switch ($jobConfig.purgeInterval) { "Daily" {1} "Weekly" {7} "Monthly" {30} default {7} }
             $cutoffDate = $now.AddDays(-$daysToKeep)
-            
             Get-ChildItem -LiteralPath $jobLogPathOld -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cutoffDate } | Remove-Item -Force -ErrorAction SilentlyContinue
             Get-ChildItem -LiteralPath $jobLogPathOld -Directory -Recurse -ErrorAction SilentlyContinue | Sort-Object -Property FullName -Descending | Remove-Item -Force -ErrorAction SilentlyContinue
         }
@@ -467,7 +506,7 @@ Function Invoke-LogMaintenance {
 }
 
 # ==============================================================================
-# 5. GUI: CONFIGURATION WINDOW
+# 6. GUI: CONFIGURATION WINDOWS
 # ==============================================================================
 
 $ContextMenuStrip = New-Object System.Windows.Forms.ContextMenuStrip
@@ -482,9 +521,70 @@ Function Set-TrayStyle {
 }
 Set-TrayStyle
 
+Function Show-TelemetryConfigWindow {
+    param($currentData, $allowApi)
+
+    $tf = $Global:ConfigForm.Font.Name -eq "Segoe UI"
+    $xScale = if ($tf) { 1.25 } else { 1 }
+    $yScale = if ($tf) { 1.5 } else { 1 }
+    
+    Function P2($x, $y) { return New-Object System.Drawing.Point([int]($x * $xScale), [int]($y * $yScale)) }
+    Function S2($w, $h) { return New-Object System.Drawing.Size([int]($w * $xScale), [int]($h * $yScale)) }
+
+    $telForm = New-Object System.Windows.Forms.Form
+    $telForm.Text = "Configure Telemetry"
+    $telForm.Size = S2 300 240
+    $telForm.StartPosition = "CenterParent"
+    $telForm.FormBorderStyle = "FixedDialog"
+    $telForm.MaximizeBox = $false
+    if ($tf) { $telForm.Font = New-Object System.Drawing.Font("Segoe UI", 11) }
+
+    $lblTitleCol = New-Object System.Windows.Forms.Label; $lblTitleCol.Text = "Window Title"; $lblTitleCol.Location = P2 20 20; $lblTitleCol.AutoSize = $true; $telForm.Controls.Add($lblTitleCol)
+    $lblTrayCol = New-Object System.Windows.Forms.Label; $lblTrayCol.Text = "System Tray"; $lblTrayCol.Location = P2 150 20; $lblTrayCol.AutoSize = $true; $telForm.Controls.Add($lblTrayCol)
+
+    $chkTitlePid = New-Object System.Windows.Forms.CheckBox; $chkTitlePid.Text = "PID"; $chkTitlePid.Location = P2 20 45; $chkTitlePid.AutoSize = $true; $chkTitlePid.Checked = $currentData.titlePid; $telForm.Controls.Add($chkTitlePid)
+    $chkTrayPid = New-Object System.Windows.Forms.CheckBox; $chkTrayPid.Text = "PID"; $chkTrayPid.Location = P2 150 45; $chkTrayPid.AutoSize = $true; $chkTrayPid.Checked = $currentData.trayPid; $telForm.Controls.Add($chkTrayPid)
+
+    $chkTitlePorts = New-Object System.Windows.Forms.CheckBox; $chkTitlePorts.Text = "Ports"; $chkTitlePorts.Location = P2 20 70; $chkTitlePorts.AutoSize = $true; $chkTitlePorts.Checked = $currentData.titlePorts; $telForm.Controls.Add($chkTitlePorts)
+    $chkTrayPorts = New-Object System.Windows.Forms.CheckBox; $chkTrayPorts.Text = "Ports"; $chkTrayPorts.Location = P2 150 70; $chkTrayPorts.AutoSize = $true; $chkTrayPorts.Checked = $currentData.trayPorts; $telForm.Controls.Add($chkTrayPorts)
+
+    $chkTitleLobby = New-Object System.Windows.Forms.CheckBox; $chkTitleLobby.Text = "Lobby Info"; $chkTitleLobby.Location = P2 20 95; $chkTitleLobby.AutoSize = $true; $chkTitleLobby.Checked = $currentData.titleLobby; $telForm.Controls.Add($chkTitleLobby)
+    $chkTrayLobby = New-Object System.Windows.Forms.CheckBox; $chkTrayLobby.Text = "Lobby Info"; $chkTrayLobby.Location = P2 150 95; $chkTrayLobby.AutoSize = $true; $chkTrayLobby.Checked = $currentData.trayLobby; $telForm.Controls.Add($chkTrayLobby)
+
+    $chkTitlePlayers = New-Object System.Windows.Forms.CheckBox; $chkTitlePlayers.Text = "Player Count"; $chkTitlePlayers.Location = P2 20 120; $chkTitlePlayers.AutoSize = $true; $chkTitlePlayers.Checked = $currentData.titlePlayers; $telForm.Controls.Add($chkTitlePlayers)
+    $chkTrayPlayers = New-Object System.Windows.Forms.CheckBox; $chkTrayPlayers.Text = "Player Count"; $chkTrayPlayers.Location = P2 150 120; $chkTrayPlayers.AutoSize = $true; $chkTrayPlayers.Checked = $currentData.trayPlayers; $telForm.Controls.Add($chkTrayPlayers)
+
+    $chkTitleUptime = New-Object System.Windows.Forms.CheckBox; $chkTitleUptime.Text = "Uptime"; $chkTitleUptime.Location = P2 20 145; $chkTitleUptime.AutoSize = $true; $chkTitleUptime.Checked = $currentData.titleUptime; $telForm.Controls.Add($chkTitleUptime)
+    $chkTrayUptime = New-Object System.Windows.Forms.CheckBox; $chkTrayUptime.Text = "Uptime"; $chkTrayUptime.Location = P2 150 145; $chkTrayUptime.AutoSize = $true; $chkTrayUptime.Checked = $currentData.trayUptime; $telForm.Controls.Add($chkTrayUptime)
+
+    if (-not $allowApi) {
+        $chkTitleLobby.Enabled = $false; $chkTrayLobby.Enabled = $false
+        $chkTitlePlayers.Enabled = $false; $chkTrayPlayers.Enabled = $false
+    }
+
+    $btnSave = New-Object System.Windows.Forms.Button; $btnSave.Text = "Save"; $btnSave.Location = P2 50 170; $btnSave.Size = S2 80 25; $telForm.Controls.Add($btnSave)
+    $btnSave.Add_Click({
+        $telForm.Tag = @{
+            titlePid = $chkTitlePid.Checked; titlePorts = $chkTitlePorts.Checked; titleLobby = $chkTitleLobby.Checked; titlePlayers = $chkTitlePlayers.Checked; titleUptime = $chkTitleUptime.Checked
+            trayPid = $chkTrayPid.Checked; trayPorts = $chkTrayPorts.Checked; trayLobby = $chkTrayLobby.Checked; trayPlayers = $chkTrayPlayers.Checked; trayUptime = $chkTrayUptime.Checked
+        }
+        $telForm.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $telForm.Close()
+    })
+
+    $btnCancel = New-Object System.Windows.Forms.Button; $btnCancel.Text = "Cancel"; $btnCancel.Location = P2 150 170; $btnCancel.Size = S2 80 25; $telForm.Controls.Add($btnCancel)
+    $btnCancel.Add_Click({
+        $telForm.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+        $telForm.Close()
+    })
+
+    $res = $telForm.ShowDialog()
+    if ($res -eq [System.Windows.Forms.DialogResult]::OK) { return $telForm.Tag }
+    return $null
+}
+
 Function Show-PortConfigWindow {
     param([int]$numInstances, [array]$currentPorts)
-
     $tf = $Global:ConfigForm.Font.Name -eq "Segoe UI"
     $xScale = if ($tf) { 1.25 } else { 1 }
     $yScale = if ($tf) { 1.5 } else { 1 }
@@ -501,13 +601,10 @@ Function Show-PortConfigWindow {
     if ($tf) { $portForm.Font = New-Object System.Drawing.Font("Segoe UI", 11) }
 
     $panel = New-Object System.Windows.Forms.Panel
-    $panel.Location = P2 10 10
-    $panel.Size = S2 340 300
-    $panel.AutoScroll = $true
+    $panel.Location = P2 10 10; $panel.Size = S2 340 300; $panel.AutoScroll = $true
     $portForm.Controls.Add($panel)
 
-    $ctrlPairs = @()
-    $yOffset = 0
+    $ctrlPairs = @(); $yOffset = 0
 
     for ($i = 0; $i -lt $numInstances; $i++) {
         $lblInst = New-Object System.Windows.Forms.Label; $lblInst.Text = "Instance $($i + 1):"; $lblInst.Font = New-Object System.Drawing.Font($portForm.Font, [System.Drawing.FontStyle]::Bold); $lblInst.Location = P2 10 $yOffset; $lblInst.AutoSize = $true; $panel.Controls.Add($lblInst)
@@ -526,66 +623,49 @@ Function Show-PortConfigWindow {
             $txtAPI.Text = "$($currentPorts[$i].API)"
         }
 
-        $panel.Controls.Add($txtGS)
-        $panel.Controls.Add($txtAPI)
-        
+        $panel.Controls.Add($txtGS); $panel.Controls.Add($txtAPI)
         $ctrlPairs += @{ GS = $txtGS; API = $txtAPI }
         $yOffset += 40
     }
 
     $btnSave = New-Object System.Windows.Forms.Button; $btnSave.Text = "Save"; $btnSave.Location = P2 90 320; $btnSave.Size = S2 80 25; $portForm.Controls.Add($btnSave)
     $btnSave.Add_Click({
-        $err = $false
-        $seen = @{}
-        $newPorts = @()
+        $err = $false; $seen = @{}; $newPorts = @()
 
         foreach ($p in $ctrlPairs) {
             $gsStr = $p.GS.Text; $apiStr = $p.API.Text
             if ([string]::IsNullOrWhiteSpace($gsStr) -or [string]::IsNullOrWhiteSpace($apiStr)) { $err = $true; break }
-            
             try { $gsInt = [int]$gsStr; $apiInt = [int]$apiStr } catch { $err = $true; break }
-            
             if ($gsInt -lt 1 -or $gsInt -gt 65535 -or $apiInt -lt 1 -or $apiInt -gt 65535) { $err = $true; break }
             if ($gsInt -eq $apiInt) { $err = $true; break }
             if ($seen[$gsInt] -or $seen[$apiInt]) { $err = $true; break }
-            
             $seen[$gsInt] = $true; $seen[$apiInt] = $true
             $newPorts += @{ GS = $gsInt; API = $apiInt }
         }
 
-        if ($err) {
-            [System.Windows.Forms.MessageBox]::Show("Please ensure all ports are valid numbers (1-65535), not empty, and completely unique (no duplicates or matching pairs).", "Validation Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
-        } else {
-            $portForm.Tag = $newPorts
-            $portForm.DialogResult = [System.Windows.Forms.DialogResult]::OK
-            $portForm.Close()
-        }
+        if ($err) { [System.Windows.Forms.MessageBox]::Show("Please ensure all ports are valid numbers (1-65535), not empty, and completely unique.", "Validation Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) } 
+        else { $portForm.Tag = $newPorts; $portForm.DialogResult = [System.Windows.Forms.DialogResult]::OK; $portForm.Close() }
     })
 
     $btnDiscard = New-Object System.Windows.Forms.Button; $btnDiscard.Text = "Discard"; $btnDiscard.Location = P2 190 320; $btnDiscard.Size = S2 80 25; $portForm.Controls.Add($btnDiscard)
-    $btnDiscard.Add_Click({
-        $portForm.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-        $portForm.Close()
-    })
+    $btnDiscard.Add_Click({ $portForm.DialogResult = [System.Windows.Forms.DialogResult]::Cancel; $portForm.Close() })
 
     $res = $portForm.ShowDialog()
     if ($res -eq [System.Windows.Forms.DialogResult]::OK) { return $portForm.Tag }
     return $null
 }
 
-
 Function Show-ConfigWindow {
     if ($null -ne $Global:ConfigForm -and -not $Global:ConfigForm.IsDisposed) {
-        if ($Global:ConfigForm.WindowState -eq 'Minimized') {
-            $Global:ConfigForm.WindowState = 'Normal'
-        }
+        if ($Global:ConfigForm.WindowState -eq 'Minimized') { $Global:ConfigForm.WindowState = 'Normal' }
         $Global:ConfigForm.Activate()
         return
     }
     
     $monitorData = Get-MonitorConfig
-    $tf = $monitorData.touchFriendly
+    $oldConfigStr = $monitorData | ConvertTo-Json -Compress
     
+    $tf = $monitorData.touchFriendly
     $xScale = if ($tf) { 1.25 } else { 1 }
     $yScale = if ($tf) { 1.5 } else { 1 }
     $hScale = if ($tf) { 1.5 } else { 1 }
@@ -603,14 +683,11 @@ Function Show-ConfigWindow {
     if ($tf) { $form.Font = New-Object System.Drawing.Font("Segoe UI", 11) }
 
     $tabControl = New-Object System.Windows.Forms.TabControl
-    $tabControl.Location = P 10 10
-    $tabControl.Size = New-Object System.Drawing.Size([int](425 * $xScale), [int](460 * $yScale))
+    $tabControl.Location = P 10 10; $tabControl.Size = New-Object System.Drawing.Size([int](425 * $xScale), [int](460 * $yScale))
     $form.Controls.Add($tabControl)
 
     # --- TAB 1: SERVER SETTINGS ---
-    $tabServer = New-Object System.Windows.Forms.TabPage
-    $tabServer.Text = "Server Settings"
-    $tabControl.TabPages.Add($tabServer)
+    $tabServer = New-Object System.Windows.Forms.TabPage; $tabServer.Text = "Server Settings"; $tabControl.TabPages.Add($tabServer)
 
     $lblInst = New-Object System.Windows.Forms.Label; $lblInst.Text = "Number of Instances:"; $lblInst.Location = P 20 25; $lblInst.AutoSize = $true; $tabServer.Controls.Add($lblInst)
     $txtInst = New-Object System.Windows.Forms.TextBox; $txtInst.Location = P 250 22; $txtInst.Size = S 120 20; $txtInst.Text = "$($monitorData.amountOfInstances)"; $tabServer.Controls.Add($txtInst)
@@ -637,7 +714,6 @@ Function Show-ConfigWindow {
 
     $lblPortMap = New-Object System.Windows.Forms.Label; $lblPortMap.Text = "Port Mapping:"; $lblPortMap.Location = P 20 240; $lblPortMap.AutoSize = $true; $tabServer.Controls.Add($lblPortMap)
     
-    # isolate the portmap toggle from the timestep toggle
     $pnlPortMap = New-Object System.Windows.Forms.Panel; $pnlPortMap.Location = P 100 235; $pnlPortMap.Size = S 150 30; $tabServer.Controls.Add($pnlPortMap)
     $rbAutoMap = New-Object System.Windows.Forms.RadioButton; $rbAutoMap.Text = "Automatic"; $rbAutoMap.Location = P 5 3; $rbAutoMap.AutoSize = $true; $pnlPortMap.Controls.Add($rbAutoMap)
     $rbManMap = New-Object System.Windows.Forms.RadioButton; $rbManMap.Text = "Manual"; $rbManMap.Location = P 85 3; $rbManMap.AutoSize = $true; $pnlPortMap.Controls.Add($rbManMap)
@@ -645,12 +721,10 @@ Function Show-ConfigWindow {
     $txtBasePort = New-Object System.Windows.Forms.TextBox; $txtBasePort.Location = P 260 238; $txtBasePort.Size = S 120 20; $txtBasePort.Text = "$($monitorData.basePort)"; $tabServer.Controls.Add($txtBasePort)
     $btnConfigPorts = New-Object System.Windows.Forms.Button; $btnConfigPorts.Text = "Configure Ports"; $btnConfigPorts.Location = P 260 237; $btnConfigPorts.Size = S 120 23; $tabServer.Controls.Add($btnConfigPorts)
 
-    # Set hint on text box via P/Invoke
     [Win32Window]::SendMessage($txtBasePort.Handle, 0x1501, [IntPtr]1, "Base Port") | Out-Null
 
     $Global:TempManualPorts = @()
     if ($monitorData.manualPortArray) { $Global:TempManualPorts = @($monitorData.manualPortArray) }
-
     $btnConfigPorts.Add_Click({
         try { $numInstCount = [int]$txtInst.Text } catch { $numInstCount = 1 }
         $res = Show-PortConfigWindow -numInstances $numInstCount -currentPorts $Global:TempManualPorts
@@ -658,17 +732,10 @@ Function Show-ConfigWindow {
     })
 
     $UpdateMapMode = {
-        if ($rbAutoMap.Checked) {
-            $txtBasePort.Visible = $true
-            $btnConfigPorts.Visible = $false
-        } else {
-            $txtBasePort.Visible = $false
-            $btnConfigPorts.Visible = $true
-        }
+        if ($rbAutoMap.Checked) { $txtBasePort.Visible = $true; $btnConfigPorts.Visible = $false } 
+        else { $txtBasePort.Visible = $false; $btnConfigPorts.Visible = $true }
     }
-    $rbAutoMap.Add_CheckedChanged($UpdateMapMode)
-    $rbManMap.Add_CheckedChanged($UpdateMapMode)
-
+    $rbAutoMap.Add_CheckedChanged($UpdateMapMode); $rbManMap.Add_CheckedChanged($UpdateMapMode)
     if ($monitorData.portMappingMode -eq "Manual") { $rbManMap.Checked = $true } else { $rbAutoMap.Checked = $true }
     & $UpdateMapMode
 
@@ -676,9 +743,7 @@ Function Show-ConfigWindow {
     $txtGuilds = New-Object System.Windows.Forms.TextBox; $txtGuilds.Location = P 150 272; $txtGuilds.Size = S 230 20; $txtGuilds.Text = (Get-Guilds); $tabServer.Controls.Add($txtGuilds)
 
     # --- TAB 2: MONITOR SETTINGS ---
-    $tabMonitor = New-Object System.Windows.Forms.TabPage
-    $tabMonitor.Text = "Monitor Settings"
-    $tabControl.TabPages.Add($tabMonitor)
+    $tabMonitor = New-Object System.Windows.Forms.TabPage; $tabMonitor.Text = "Monitor Settings"; $tabControl.TabPages.Add($tabMonitor)
 
     $lblCheck = New-Object System.Windows.Forms.Label; $lblCheck.Text = "Monitor Update Frequency (sec):"; $lblCheck.Location = P 20 15; $lblCheck.AutoSize = $true; $tabMonitor.Controls.Add($lblCheck)
     $txtCheck = New-Object System.Windows.Forms.TextBox; $txtCheck.Location = P 250 12; $txtCheck.Size = S 120 20; $txtCheck.Text = "$($monitorData.delayProcessCheck / 1000)"; $tabMonitor.Controls.Add($txtCheck)
@@ -712,44 +777,26 @@ Function Show-ConfigWindow {
     $txtAutoRestart = New-Object System.Windows.Forms.TextBox; $txtAutoRestart.Location = P 250 192; $txtAutoRestart.Size = S 120 20; $txtAutoRestart.Text = "$($monitorData.autoRestartTimeout)"; $txtAutoRestart.Enabled = $monitorData.autoRestartIdle; $tabMonitor.Controls.Add($txtAutoRestart)
     $chkAutoRestart.Add_CheckedChanged({ $txtAutoRestart.Enabled = $chkAutoRestart.Checked })
 
+    $chkLogging = New-Object System.Windows.Forms.CheckBox; $chkLogging.Text = "Monitor Event Logging"; $chkLogging.Location = P 20 225; $chkLogging.AutoSize = $true; $chkLogging.Checked = $monitorData.enableMonitorLogging; $tabMonitor.Controls.Add($chkLogging)
+
     $telSize = if ($tf) { 10 } else { 8 }
-    $lblTelemetry = New-Object System.Windows.Forms.Label; $lblTelemetry.Text = "Telemetry Visibility:"; $lblTelemetry.Font = New-Object System.Drawing.Font("Arial", $telSize, [System.Drawing.FontStyle]::Bold); $lblTelemetry.Location = P 20 225; $lblTelemetry.AutoSize = $true; $tabMonitor.Controls.Add($lblTelemetry)
+    $lblTelemetry = New-Object System.Windows.Forms.Label; $lblTelemetry.Text = "Telemetry Visibility:"; $lblTelemetry.Font = New-Object System.Drawing.Font("Arial", $telSize, [System.Drawing.FontStyle]::Bold); $lblTelemetry.Location = P 20 255; $lblTelemetry.AutoSize = $true; $tabMonitor.Controls.Add($lblTelemetry)
 
-    $lblTitleCol = New-Object System.Windows.Forms.Label; $lblTitleCol.Text = "Window Title"; $lblTitleCol.Location = P 20 245; $lblTitleCol.AutoSize = $true; $tabMonitor.Controls.Add($lblTitleCol)
-    $lblTrayCol = New-Object System.Windows.Forms.Label; $lblTrayCol.Text = "System Tray"; $lblTrayCol.Location = P 170 245; $lblTrayCol.AutoSize = $true; $tabMonitor.Controls.Add($lblTrayCol)
-
-    $chkTitlePid = New-Object System.Windows.Forms.CheckBox; $chkTitlePid.Text = "PID"; $chkTitlePid.Location = P 20 270; $chkTitlePid.AutoSize = $true; $chkTitlePid.Checked = $monitorData.titlePid; $tabMonitor.Controls.Add($chkTitlePid)
-    $chkTrayPid = New-Object System.Windows.Forms.CheckBox; $chkTrayPid.Text = "PID"; $chkTrayPid.Location = P 170 270; $chkTrayPid.AutoSize = $true; $chkTrayPid.Checked = $monitorData.trayPid; $tabMonitor.Controls.Add($chkTrayPid)
-
-    $chkTitlePorts = New-Object System.Windows.Forms.CheckBox; $chkTitlePorts.Text = "Ports"; $chkTitlePorts.Location = P 20 295; $chkTitlePorts.AutoSize = $true; $chkTitlePorts.Checked = $monitorData.titlePorts; $tabMonitor.Controls.Add($chkTitlePorts)
-    $chkTrayPorts = New-Object System.Windows.Forms.CheckBox; $chkTrayPorts.Text = "Ports"; $chkTrayPorts.Location = P 170 295; $chkTrayPorts.AutoSize = $true; $chkTrayPorts.Checked = $monitorData.trayPorts; $tabMonitor.Controls.Add($chkTrayPorts)
-
-    $chkTitleLobby = New-Object System.Windows.Forms.CheckBox; $chkTitleLobby.Text = "Lobby Info"; $chkTitleLobby.Location = P 20 320; $chkTitleLobby.AutoSize = $true; $chkTitleLobby.Checked = $monitorData.titleLobby; $tabMonitor.Controls.Add($chkTitleLobby)
-    $chkTrayLobby = New-Object System.Windows.Forms.CheckBox; $chkTrayLobby.Text = "Lobby Info"; $chkTrayLobby.Location = P 170 320; $chkTrayLobby.AutoSize = $true; $chkTrayLobby.Checked = $monitorData.trayLobby; $tabMonitor.Controls.Add($chkTrayLobby)
-
-    $chkTitlePlayers = New-Object System.Windows.Forms.CheckBox; $chkTitlePlayers.Text = "Player Count"; $chkTitlePlayers.Location = P 20 345; $chkTitlePlayers.AutoSize = $true; $chkTitlePlayers.Checked = $monitorData.titlePlayers; $tabMonitor.Controls.Add($chkTitlePlayers)
-    $chkTrayPlayers = New-Object System.Windows.Forms.CheckBox; $chkTrayPlayers.Text = "Player Count"; $chkTrayPlayers.Location = P 170 345; $chkTrayPlayers.AutoSize = $true; $chkTrayPlayers.Checked = $monitorData.trayPlayers; $tabMonitor.Controls.Add($chkTrayPlayers)
-
-    $chkTitleUptime = New-Object System.Windows.Forms.CheckBox; $chkTitleUptime.Text = "Uptime"; $chkTitleUptime.Location = P 20 370; $chkTitleUptime.AutoSize = $true; $chkTitleUptime.Checked = $monitorData.titleUptime; $tabMonitor.Controls.Add($chkTitleUptime)
-    $chkTrayUptime = New-Object System.Windows.Forms.CheckBox; $chkTrayUptime.Text = "Uptime"; $chkTrayUptime.Location = P 170 370; $chkTrayUptime.AutoSize = $true; $chkTrayUptime.Checked = $monitorData.trayUptime; $tabMonitor.Controls.Add($chkTrayUptime)
-
-    $chkTouch = New-Object System.Windows.Forms.CheckBox; $chkTouch.Text = "Enable Touch-Friendly Interface"; $chkTouch.Location = P 20 405; $chkTouch.AutoSize = $true; $chkTouch.Checked = $monitorData.touchFriendly; $tabMonitor.Controls.Add($chkTouch)
-
-    # Setup the logic specifically for the Monitor API Usage checkbox
-    $chkAllowMonitorApi.Add_CheckedChanged({
-        $enabled = $chkAllowMonitorApi.Checked
-        $chkTitleLobby.Enabled = $enabled; $chkTrayLobby.Enabled = $enabled
-        $chkTitlePlayers.Enabled = $enabled; $chkTrayPlayers.Enabled = $enabled
-    })
+    $Global:TempTelemetry = @{
+        titlePid = $monitorData.titlePid; titlePorts = $monitorData.titlePorts; titleLobby = $monitorData.titleLobby; titlePlayers = $monitorData.titlePlayers; titleUptime = $monitorData.titleUptime
+        trayPid = $monitorData.trayPid; trayPorts = $monitorData.trayPorts; trayLobby = $monitorData.trayLobby; trayPlayers = $monitorData.trayPlayers; trayUptime = $monitorData.trayUptime
+    }
     
-    # Force initial state on load
-    $chkTitleLobby.Enabled = $monitorData.allowMonitorApi; $chkTrayLobby.Enabled = $monitorData.allowMonitorApi
-    $chkTitlePlayers.Enabled = $monitorData.allowMonitorApi; $chkTrayPlayers.Enabled = $monitorData.allowMonitorApi
+    $btnConfigTelemetry = New-Object System.Windows.Forms.Button; $btnConfigTelemetry.Text = "Configure"; $btnConfigTelemetry.Location = P 170 253; $btnConfigTelemetry.Size = S 80 23; $tabMonitor.Controls.Add($btnConfigTelemetry)
+    $btnConfigTelemetry.Add_Click({
+        $res = Show-TelemetryConfigWindow -currentData $Global:TempTelemetry -allowApi $chkAllowMonitorApi.Checked
+        if ($res) { $Global:TempTelemetry = $res }
+    })
+
+    $chkTouch = New-Object System.Windows.Forms.CheckBox; $chkTouch.Text = "Enable Touch-Friendly Interface"; $chkTouch.Location = P 20 285; $chkTouch.AutoSize = $true; $chkTouch.Checked = $monitorData.touchFriendly; $tabMonitor.Controls.Add($chkTouch)
 
     # --- TAB 3: ABOUT ---
-    $tabAbout = New-Object System.Windows.Forms.TabPage
-    $tabAbout.Text = "About"
-    $tabControl.TabPages.Add($tabAbout)
+    $tabAbout = New-Object System.Windows.Forms.TabPage; $tabAbout.Text = "About"; $tabControl.TabPages.Add($tabAbout)
 
     $pfcStencil = New-Object System.Drawing.Text.PrivateFontCollection
     $pfcNeuro = New-Object System.Drawing.Text.PrivateFontCollection
@@ -762,47 +809,34 @@ Function Show-ConfigWindow {
     $lblTitle = New-Object System.Windows.Forms.Label
     $lblTitle.Text = "EchoVR Server Monitor"
     
-    $titleStencilSize = if ($tf) { 16 } else { 12 }
-    $titleArialSize = if ($tf) { 18 } else { 14 }
+    $titleStencilSize = if ($tf) { 16 } else { 12 }; $titleArialSize = if ($tf) { 18 } else { 14 }
     
     if ($pfcStencil.Families.Count -gt 0) { $lblTitle.Font = New-Object System.Drawing.Font($pfcStencil.Families[0], $titleStencilSize, [System.Drawing.FontStyle]::Regular) } 
     else { $lblTitle.Font = New-Object System.Drawing.Font("Arial", $titleArialSize, [System.Drawing.FontStyle]::Bold) }
     
-    $lblTitle.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-    $lblTitle.Location = P 10 40; $lblTitle.Size = S 400 30
+    $lblTitle.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter; $lblTitle.Location = P 10 40; $lblTitle.Size = S 400 30
     $tabAbout.Controls.Add($lblTitle)
 
     $lblVersion = New-Object System.Windows.Forms.Label
     $lblVersion.Text = "v$($Global:Version)"
-    
     $versionSize = if ($tf) { 16 } else { 12 }
     
     if ($pfcNeuro.Families.Count -gt 0) { $lblVersion.Font = New-Object System.Drawing.Font($pfcNeuro.Families[0], $versionSize, [System.Drawing.FontStyle]::Bold) } 
     else { $lblVersion.Font = New-Object System.Drawing.Font("Arial", $versionSize, [System.Drawing.FontStyle]::Bold) }
     
-    $lblVersion.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-    $lblVersion.Location = P 10 65; $lblVersion.Size = S 400 30
+    $lblVersion.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter; $lblVersion.Location = P 10 65; $lblVersion.Size = S 400 30
     $tabAbout.Controls.Add($lblVersion)
 
     $lblPing = New-Object System.Windows.Forms.Label
     $lblPing.Text = "Ping @berg_ on Discord for issues/feedback!"
-    $lblPing.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-    $lblPing.Location = P 10 110; $lblPing.Size = S 400 20
+    $lblPing.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter; $lblPing.Location = P 10 110; $lblPing.Size = S 400 20
     $tabAbout.Controls.Add($lblPing)
 
     $btnAboutUpdate = New-Object System.Windows.Forms.Button
-    $btnAboutUpdate.Text = "Check for Updates"
-    $btnAboutUpdate.Location = P 135 150; $btnAboutUpdate.Size = S 150 30
+    $btnAboutUpdate.Text = "Check for Updates"; $btnAboutUpdate.Location = P 135 150; $btnAboutUpdate.Size = S 150 30
     $btnAboutUpdate.Add_Click({ 
         Test-ForUpdates -ManualCheck $true 
-        
-        # 1. Save the new timestamp to the configuration file
-        $conf = Get-MonitorConfig
-        $newDate = Get-Date
-        $conf.lastUpdateCheckDate = $newDate.ToString("o")
-        Save-MonitorConfig $conf
-        
-        # 2. Dynamically update the label text on the active UI
+        $conf = Get-MonitorConfig; $newDate = Get-Date; $conf.lastUpdateCheckDate = $newDate.ToString("o"); Save-MonitorConfig $conf
         $lblLastUpdate.Text = "Last Checked on $($newDate.ToString("MM-dd-yyyy 'at' HH:mm:ss"))"
     })
     $tabAbout.Controls.Add($btnAboutUpdate)
@@ -810,22 +844,12 @@ Function Show-ConfigWindow {
     $lblLastUpdate = New-Object System.Windows.Forms.Label
     try {
         $lastDate = [datetime]$monitorData.lastUpdateCheckDate
-        if ($lastDate.Year -eq 2000) { 
-            $dateStr = "Never" 
-        } else { 
-            $dateStr = $lastDate.ToString("MM-dd-yyyy 'at' HH:mm:ss") 
-        }
-    } catch {
-        $dateStr = "Unknown"
-    }
+        if ($lastDate.Year -eq 2000) { $dateStr = "Never" } else { $dateStr = $lastDate.ToString("MM-dd-yyyy 'at' HH:mm:ss") }
+    } catch { $dateStr = "Unknown" }
     
-    $lblLastUpdate.Text = "Last Checked on $dateStr"
-    $lblLastUpdate.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-    
+    $lblLastUpdate.Text = "Last Checked on $dateStr"; $lblLastUpdate.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
     $lblUpdateSize = if ($tf) { 10 } else { 9 }
-    $lblLastUpdate.Font = New-Object System.Drawing.Font("Segoe UI", $lblUpdateSize, [System.Drawing.FontStyle]::Regular)
-    $lblLastUpdate.Location = P 10 190
-    $lblLastUpdate.Size = S 400 20
+    $lblLastUpdate.Font = New-Object System.Drawing.Font("Segoe UI", $lblUpdateSize, [System.Drawing.FontStyle]::Regular); $lblLastUpdate.Location = P 10 190; $lblLastUpdate.Size = S 400 20
     $tabAbout.Controls.Add($lblLastUpdate)
 
     # --- BOTTOM BUTTONS ---
@@ -844,9 +868,7 @@ Function Show-ConfigWindow {
             if ($chkAutoRestart.Checked -and [int]$txtAutoRestart.Text -lt 1) { throw "Invalid Timeout" }
             $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
             $form.Close()
-        } catch {
-            [System.Windows.Forms.MessageBox]::Show("Please enter valid numbers for the required fields.", "Input Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
-        }
+        } catch { [System.Windows.Forms.MessageBox]::Show("Please enter valid numbers for the required fields.", "Input Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) }
     })
 
     $btnRestore = New-Object System.Windows.Forms.Button; $btnRestore.Text = "Defaults"; $btnRestore.Location = P 180 520; $btnRestore.Size = S 80 25; $form.Controls.Add($btnRestore)
@@ -859,11 +881,10 @@ Function Show-ConfigWindow {
         $txtCheck.Text = "5"; $chkStartup.Checked = $true; $chkArchive.Checked = $true
         $chkPurge.Checked = $false; $cmbPurge.SelectedItem = "Weekly"
         $chkAutoUpdate.Checked = $true; $cmbUpdate.SelectedItem = "Daily"
-        $chkApi.Checked = $true
-        $chkAllowMonitorApi.Checked = $true
+        $chkApi.Checked = $true; $chkAllowMonitorApi.Checked = $true
         $chkAutoRestart.Checked = $false; $txtAutoRestart.Text = "15"
-        $chkTitlePid.Checked = $true; $chkTitlePorts.Checked = $true; $chkTitleLobby.Checked = $true; $chkTitlePlayers.Checked = $true; $chkTitleUptime.Checked = $true
-        $chkTrayPid.Checked = $true; $chkTrayPorts.Checked = $true; $chkTrayLobby.Checked = $false; $chkTrayPlayers.Checked = $true; $chkTrayUptime.Checked = $true
+        $chkLogging.Checked = $false
+        $Global:TempTelemetry = @{ titlePid=$true; titlePorts=$true; titleLobby=$true; titlePlayers=$true; titleUptime=$true; trayPid=$true; trayPorts=$true; trayLobby=$false; trayPlayers=$true; trayUptime=$true }
         $chkTouch.Checked = $false
     })
 
@@ -875,31 +896,24 @@ Function Show-ConfigWindow {
         $numInst = [int]$txtInst.Text
         $tStep = if ($rbComp.Checked) { 180 } elseif ($rbStd.Checked) { 120 } else { 0 }
         
-        # Check if any Server Settings were actually changed
         $serverSettingsChanged = $false
         if ($monitorData.amountOfInstances -ne $numInst) { $serverSettingsChanged = $true }
         if ($rbAutoMap.Checked) {
             if ($monitorData.portMappingMode -ne "Automatic") { $serverSettingsChanged = $true }
             if ($monitorData.basePort -ne [int]$txtBasePort.Text) { $serverSettingsChanged = $true }
-            $monitorData.portMappingMode = "Automatic"
-            $monitorData.basePort = [int]$txtBasePort.Text
+            $monitorData.portMappingMode = "Automatic"; $monitorData.basePort = [int]$txtBasePort.Text
         } else {
-            if ($monitorData.portMappingMode -ne "Manual") { $serverSettingsChanged = $true }
-            # Full array comparison could be complex, assume changed for safety if manual was just configured
             $serverSettingsChanged = $true 
-            $monitorData.portMappingMode = "Manual"
-            $monitorData.manualPortArray = $Global:TempManualPorts
+            $monitorData.portMappingMode = "Manual"; $monitorData.manualPortArray = $Global:TempManualPorts
         }
 
         $newKillCondition = if ($rbKillExit.Checked) { "ExitOnError" } else { "CheckLogs" }
         if ($monitorData.killCondition -ne $newKillCondition) { $serverSettingsChanged = $true }
-
         if ($monitorData.numTaskThreads -ne [int]$txtThreads.Text) { $serverSettingsChanged = $true }
         if ($monitorData.timeStep -ne $tStep) { $serverSettingsChanged = $true }
         if ($monitorData.additionalArgs -ne $txtArgs.Text) { $serverSettingsChanged = $true }
         if ($monitorData.enableApi -ne $chkApi.Checked) { $serverSettingsChanged = $true }
 
-        # Guild check is separate from instance re-spawns usually, but it modifies config.json
         $oldGuilds = Get-Guilds
         if ($oldGuilds -ne $txtGuilds.Text) { Set-Guilds $txtGuilds.Text; $serverSettingsChanged = $true }
 
@@ -918,9 +932,28 @@ Function Show-ConfigWindow {
         $monitorData.allowMonitorApi = $chkAllowMonitorApi.Checked
         $monitorData.autoRestartIdle = $chkAutoRestart.Checked
         $monitorData.autoRestartTimeout = [int]$txtAutoRestart.Text
-        $monitorData.titlePid = $chkTitlePid.Checked; $monitorData.titlePorts = $chkTitlePorts.Checked; $monitorData.titleLobby = $chkTitleLobby.Checked; $monitorData.titlePlayers = $chkTitlePlayers.Checked; $monitorData.titleUptime = $chkTitleUptime.Checked
-        $monitorData.trayPid = $chkTrayPid.Checked; $monitorData.trayPorts = $chkTrayPorts.Checked; $monitorData.trayLobby = $chkTrayLobby.Checked; $monitorData.trayPlayers = $chkTrayPlayers.Checked; $monitorData.trayUptime = $chkTrayUptime.Checked
+        $monitorData.enableMonitorLogging = $chkLogging.Checked
+        
+        $monitorData.titlePid = $Global:TempTelemetry.titlePid; $monitorData.titlePorts = $Global:TempTelemetry.titlePorts; $monitorData.titleLobby = $Global:TempTelemetry.titleLobby; $monitorData.titlePlayers = $Global:TempTelemetry.titlePlayers; $monitorData.titleUptime = $Global:TempTelemetry.titleUptime
+        $monitorData.trayPid = $Global:TempTelemetry.trayPid; $monitorData.trayPorts = $Global:TempTelemetry.trayPorts; $monitorData.trayLobby = $Global:TempTelemetry.trayLobby; $monitorData.trayPlayers = $Global:TempTelemetry.trayPlayers; $monitorData.trayUptime = $Global:TempTelemetry.trayUptime
         $monitorData.touchFriendly = $chkTouch.Checked
+
+        # Perform explicit JSON comparison for accurate diff logging
+        $newConfigStr = $monitorData | ConvertTo-Json -Compress
+        if ($oldConfigStr -ne $newConfigStr) {
+            $diffs = @()
+            $oldObj = $oldConfigStr | ConvertFrom-Json
+            foreach ($key in $monitorData.psobject.properties.Name) {
+                if ($oldObj.$key -ne $monitorData.$key) {
+                    if ($key -eq "manualPortArray") { $diffs += "$key updated" }
+                    else { $diffs += "$($key): $($oldObj.$key) -> $($monitorData.$key)" }
+                }
+            }
+            
+            # Initialize log first so the file exists before writing the settings diff
+            if ($monitorData.enableMonitorLogging -ne $oldObj.enableMonitorLogging) { Initialize-MonitorLog }
+            if ($diffs.Count -gt 0) { Write-MonitorLog "Settings changed: $($diffs -join ' | ')" }
+        }
 
         if ($rbAutoMap.Checked) { $Global:BasePort = $monitorData.basePort }
 
@@ -930,7 +963,6 @@ Function Show-ConfigWindow {
         Update-ExternalConfigs $numInst
         Set-TrayStyle
 
-        # Only perform a soft shutdown if server settings were altered
         if ($serverSettingsChanged) {
             if ($monitorData.enableApi -and $monitorData.allowMonitorApi) {
                 foreach ($k in $Global:PortMap.Keys) { $Global:PortMap[$k].ShutdownQueued = $true }
@@ -942,14 +974,11 @@ Function Show-ConfigWindow {
             [System.Windows.Forms.MessageBox]::Show("Configuration Saved.", "Info", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
         }
     }
-
-    # Free memory used by the config window when it closes
     $form.Dispose()
-
 }
 
 # ==============================================================================
-# 6. PORT MANAGEMENT
+# 7. PORT MANAGEMENT
 # ==============================================================================
 
 Function Get-AvailablePortPair {
@@ -984,7 +1013,7 @@ Function Get-ManualPortPair {
 }
 
 # ==============================================================================
-# 7. SYSTEM TRAY & MENU
+# 8. SYSTEM TRAY & MENU
 # ==============================================================================
 
 $MenuItemStatus = New-Object System.Windows.Forms.ToolStripMenuItem
@@ -1012,17 +1041,24 @@ $MenuItemPause.Text = "Pause Server Spawning"
 $MenuItemPause.CheckOnClick = $true
 $initialConfig = Get-MonitorConfig
 $MenuItemPause.Checked = $initialConfig.pauseSpawning
+
 $MenuItemPause.Add_Click({
     $conf = Get-MonitorConfig
     $conf.pauseSpawning = $MenuItemPause.Checked
     Save-MonitorConfig $conf
+    
+    $statusStr = if ($MenuItemPause.Checked) { "paused" } else { "unpaused" }
+    Write-MonitorLog "Spawning $statusStr by user"
+    
     if (-not $conf.pauseSpawning) { $Global:LinkCodeActive = $false }
 })
+
 $ContextMenuStrip.Items.Add($MenuItemPause) | Out-Null
 
 $MenuItemExit = New-Object System.Windows.Forms.ToolStripMenuItem
 $MenuItemExit.Text = "Exit"
 $MenuItemExit.Add_Click({
+    Write-MonitorLog "Monitor exited by user"
     $MonitorTimer.Stop()
     $NotifyIcon.Visible = $false
     Save-PortMap
@@ -1036,7 +1072,6 @@ $NotifyIcon.Text = "EchoVR Server Monitor"
 $NotifyIcon.ContextMenuStrip = $ContextMenuStrip
 $NotifyIcon.Visible = $true
 
-# Triggers standard context menu via hacky reflection to get it to display natively on left click 
 $NotifyIcon.Add_MouseClick({
     if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
         try {
@@ -1053,10 +1088,9 @@ $NotifyIcon.Add_DoubleClick({
 })
 
 # ==============================================================================
-# 8. NATIVE API POLLING
+# 9. NATIVE API POLLING
 # ==============================================================================
 
-# Ultra-fast TCP port check to prevent UI freezing if server is down
 Function Test-PortOpen ($port, $timeoutMs=100) {
     try {
         $tcp = New-Object System.Net.Sockets.TcpClient
@@ -1109,20 +1143,17 @@ Function Get-EchoApiData ($apiPort) {
 }
 
 # ==============================================================================
-# 9. MONITORING LOGIC
+# 10. MONITORING LOGIC
 # ==============================================================================
 
 $MonitorTimer = New-Object System.Windows.Forms.Timer
-# random value to start with, switches to user-defined value on first tick
 $MonitorTimer.Interval = 3000
 
 $MonitorAction = {
     $config = Get-MonitorConfig
     $MonitorTimer.Interval = $config.delayProcessCheck
     
-    if ($config.portMappingMode -eq "Automatic") {
-        $Global:BasePort = $config.basePort
-    }
+    if ($config.portMappingMode -eq "Automatic") { $Global:BasePort = $config.basePort }
 
     $now = Get-Date
     $currentDay = $now.DayOfYear
@@ -1145,6 +1176,7 @@ $MonitorAction = {
     $trackedPids = @($Global:PortMap.Keys)
     foreach ($pidKey in $trackedPids) {
         if ($runningIds -notcontains $pidKey) { 
+            Write-MonitorLog "Instance exited or killed automatically (process terminated)" -ProcId $pidKey -pData $Global:PortMap[$pidKey]
             $Global:PortMap.Remove($pidKey) 
             $Global:NotifiedPids.Remove($pidKey)
         }
@@ -1184,22 +1216,17 @@ $MonitorAction = {
                         }
                     }
 
-                    # Check Logs for targeted instance termination
                     if ($config.killCondition -eq "CheckLogs") {
-                        try {
-                            $uptimeSeconds = ($now - $proc.StartTime).TotalSeconds
-                        } catch {
-                            $uptimeSeconds = 999 # Fallback if StartTime is blocked
-                        }
-
+                        try { $uptimeSeconds = ($now - $proc.StartTime).TotalSeconds } catch { $uptimeSeconds = 999 }
                         if ($uptimeSeconds -gt $config.startupGracePeriod) {
                             foreach ($line in $lines) {
                                 if ($line.Length -ge 25) {
                                     $line_clean = $line.Substring(25) -replace "[0-9]*\.[0-9]*\.[0-9]*\.[0-9]*:[0-9]*", "" -replace "ws://.* ", "" -replace " ws://.*api_key=.*",""  -replace "\?auth=.*", ""
                                     if ($Global:TargetLogErrors -contains $line_clean) {
+                                        Write-MonitorLog "Instance exited or killed automatically (log error matched: $line_clean)" -ProcId $proc.Id -pData $pData
                                         Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
                                         $Global:PortMap.Remove($proc.Id)
-                                        break # Skip evaluating remaining lines for this instance
+                                        break
                                     }
                                 }
                             }
@@ -1211,7 +1238,6 @@ $MonitorAction = {
             # 2. Synchronous Native API Polling
             if ($config.allowMonitorApi -and (Test-PortOpen $pData.API 100)) {
                 $jobRes = Get-EchoApiData $pData.API
-                
                 if ($jobRes.success) {
                     $modeStrTitle = "Unknown Mode"; $modeStrTray = "Unknown"
                     $totalConnected = 0; $specs = 0
@@ -1227,7 +1253,6 @@ $MonitorAction = {
                     } else {
                         try {
                             $sessionObj = $jobRes.sessionStr | ConvertFrom-Json
-                            
                             $mType = $sessionObj.match_type
                             if ($mType -eq "Echo_Combat") { $modeStrTray="Combat, Public"; $modeStrTitle="Public Combat Match" }
                             elseif ($mType -eq "Echo_Combat_Private") { $modeStrTray="Combat, Private"; $modeStrTitle="Private Combat Match" }
@@ -1247,11 +1272,8 @@ $MonitorAction = {
                             if ($mapName) { $modeStrTray += " ($mapName)"; $modeStrTitle += "$mapName" }
                             
                             if ($sessionObj.teams) {
-                                # 1. Count actual regex matches to avoid disconnect gaps
                                 $playerMatches = [regex]::Matches($jobRes.sessionStr, '(?i)"playerid"\s*:\s*(\d+)')
                                 $totalConnected = $playerMatches.Count
-                                
-                                # 2. Directly target Team 2 (index 2) for Spectators
                                 if ($sessionObj.teams.Count -ge 3 -and $null -ne $sessionObj.teams[2].players) {
                                     $specs = @($sessionObj.teams[2].players).Count
                                 }
@@ -1260,17 +1282,10 @@ $MonitorAction = {
                     }
 
                     $activePlayers = $totalConnected - $specs
-
-                    if ($totalConnected -eq 0) {
-                        $pStrTitle = "0 Active Players"; $pStrTray = "0 Players"
-                    } else {
-                        if ($specs -gt 0) {
-                            $pStrTitle = "$activePlayers Active Players ($specs Spectating)"
-                            $pStrTray = "$activePlayers Players ($specs Spec.)"
-                        } else {
-                            $pStrTitle = "$activePlayers Active Players"
-                            $pStrTray = "$activePlayers Players"
-                        }
+                    if ($totalConnected -eq 0) { $pStrTitle = "0 Active Players"; $pStrTray = "0 Players" } 
+                    else {
+                        if ($specs -gt 0) { $pStrTitle = "$activePlayers Active Players ($specs Spectating)"; $pStrTray = "$activePlayers Players ($specs Spec.)" } 
+                        else { $pStrTitle = "$activePlayers Active Players"; $pStrTray = "$activePlayers Players" }
                     }
                     
                     $pData.ModeTitle = $modeStrTitle; $pData.ModeTray = $modeStrTray
@@ -1281,21 +1296,21 @@ $MonitorAction = {
 
             # 3. Soft Shutdown Evaluation & Idle Auto-Restart
             if ($pData.ModeTitle -eq "Idle") {
-                # Start or continue the idle timer
-                if ($null -eq $pData.LastIdleStart) {
+                if ($pData.PreviousMode -ne "Idle") {
                     $pData.LastIdleStart = $now
-                } elseif ($config.autoRestartIdle) {
+                } elseif ($config.autoRestartIdle -and $null -ne $pData.LastIdleStart) {
                     $idleTime = New-TimeSpan -Start $pData.LastIdleStart -End $now
-                    if ($idleTime.TotalMinutes -ge $config.autoRestartTimeout) {
+                    if ($idleTime.TotalMinutes -ge $config.autoRestartTimeout -and -not $pData.ShutdownQueued) {
                         $pData.ShutdownQueued = $true
+                        Write-MonitorLog "Instance queued for shutdown automatically (Idle timeout)" -ProcId $proc.Id -pData $pData
                     }
                 }
             } else {
-                # Clear idle timer if the server becomes active
                 $pData.LastIdleStart = $null
             }
+            $pData.PreviousMode = $pData.ModeTitle
 
-            # Process Shutdown
+            # Process Shutdown Execution
             if ($pData.ShutdownQueued) {
                 if ($pData.ModeTitle -eq "Idle") {
                     Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
@@ -1306,11 +1321,8 @@ $MonitorAction = {
         }
     }
     
-    if ($canSoftShutdown) {
-        $MenuItemStatus.Text = "Active: $runningCount / $($config.amountOfInstances) (Click Instance to Queue Shutdown)"
-    } else {
-        $MenuItemStatus.Text = "Active: $runningCount / $($config.amountOfInstances) (Allow API Usage for Soft Shutdowns)"
-    }
+    if ($canSoftShutdown) { $MenuItemStatus.Text = "Active: $runningCount / $($config.amountOfInstances) (Click Instance to Queue Shutdown)" } 
+    else { $MenuItemStatus.Text = "Active: $runningCount / $($config.amountOfInstances) (Allow API Usage for Soft Shutdowns)" }
 
     $sepIndex = $ContextMenuStrip.Items.IndexOf($MenuItemSeparator1)
     for ($i = $sepIndex - 1; $i -gt 0; $i--) { $ContextMenuStrip.Items.RemoveAt($i) }
@@ -1359,7 +1371,9 @@ $MonitorAction = {
                     $item.Add_Click({
                         $clickedPid = $this.Tag
                         if ($Global:PortMap[$clickedPid]) {
-                            $Global:PortMap[$clickedPid].ShutdownQueued = $this.Checked
+                            $newState = $this.Checked
+                            $Global:PortMap[$clickedPid].ShutdownQueued = $newState
+                            if ($newState) { Write-MonitorLog "Instance queued for shutdown by user" -ProcId $clickedPid -pData $Global:PortMap[$clickedPid] }
                         }
                     })
                 } else {
@@ -1381,19 +1395,10 @@ $MonitorAction = {
         } catch { }
 
         $Global:PendingSilentDLLUpdate = $false
-
-        # 4. Unpause Spawning
-        $conf = Get-MonitorConfig
-        $conf.pauseSpawning = $Global:SilentUpdatePreviousPauseState
-        Save-MonitorConfig $conf
-        
-        # Sync the loop's current config object so it spawns immediately this tick
+        $conf = Get-MonitorConfig; $conf.pauseSpawning = $Global:SilentUpdatePreviousPauseState; Save-MonitorConfig $conf
         $config = Get-MonitorConfig 
 
-        # Fire any pending Monitor Updates (This automatically restarts the app)
-        if ($Global:PendingMonitorUpdateUrl) {
-            Invoke-MonitorUpdate -downloadUrl $Global:PendingMonitorUpdateUrl
-        }
+        if ($Global:PendingMonitorUpdateUrl) { Invoke-MonitorUpdate -downloadUrl $Global:PendingMonitorUpdateUrl }
     }
 
     if (-not $config.pauseSpawning) {
@@ -1403,18 +1408,14 @@ $MonitorAction = {
             if (-not $freshConfig.pauseSpawning -and -not $Global:LinkCodeActive) {
                 
                 $portPair = $null
-                if ($freshConfig.portMappingMode -eq "Manual") {
-                    $portPair = Get-ManualPortPair
-                } else {
-                    $portPair = Get-AvailablePortPair
-                }
+                if ($freshConfig.portMappingMode -eq "Manual") { $portPair = Get-ManualPortPair } 
+                else { $portPair = Get-AvailablePortPair }
 
                 if ($null -ne $portPair) {
                     $exitArg = if ($config.killCondition -eq "ExitOnError") { " -exitonerror" } else { "" }
                     $timeStepArg = if ($config.timeStep -ne 0) { "-fixedtimestep -timestep $($config.timeStep) " } else { "" }
                     $launchArgs = "-numtaskthreads $($config.numTaskThreads) $timeStepArg$($config.additionalArgs) -port $($portPair.GS) -httpport $($portPair.API)$exitArg"
                     
-                    # Create a persistent rule in Windows to disable QuickEdit ONLY for this specific server executable
                     $consoleSubKey = $EchoExePath -replace '\\', '_'
                     $appRegPath = "HKCU:\Console\$consoleSubKey"
                     
@@ -1427,8 +1428,9 @@ $MonitorAction = {
                         $Global:PortMap[$newProc.Id] = @{
                             GS = $portPair.GS; API = $portPair.API
                             GS_Confirmed = $null; API_Confirmed = $null; LogPath = $null
-                            ShutdownQueued = $false; PlayerCount = 0; ModeTitle = "Unknown Mode"; LastIdleStart = $null
+                            ShutdownQueued = $false; PlayerCount = 0; ModeTitle = "Unknown Mode"; PreviousMode = "Unknown Mode"; LastIdleStart = $null
                         }
+                        Write-MonitorLog "Instance spawned" -ProcId $newProc.Id -pData $Global:PortMap[$newProc.Id]
                     }
                 }
             }
@@ -1439,7 +1441,7 @@ $MonitorAction = {
 $MonitorTimer.Add_Tick($MonitorAction)
 
 # ==============================================================================
-# 10. UPDATE LOGIC (Monitor + DLLs)
+# 11. UPDATE LOGIC (Monitor + DLLs)
 # ==============================================================================
 
 Function Test-FileHash ($path, $targetHash) {
@@ -1456,28 +1458,16 @@ Function Update-DLLs ($Silent = $false) {
     $running = Get-Process -Name $Script:EchoProcessName -ErrorAction SilentlyContinue
     if ($running) {
         if ($Silent) { 
-            # 1. Pause Spawning
-            $conf = Get-MonitorConfig
-            $Global:SilentUpdatePreviousPauseState = $conf.pauseSpawning
-            $conf.pauseSpawning = $true
-            Save-MonitorConfig $conf
-            
-            # 2. Queue Soft Shutdowns
+            $conf = Get-MonitorConfig; $Global:SilentUpdatePreviousPauseState = $conf.pauseSpawning; $conf.pauseSpawning = $true; Save-MonitorConfig $conf
             foreach ($k in $Global:PortMap.Keys) {
-                if ($conf.enableApi -and $conf.allowMonitorApi) {
-                    $Global:PortMap[$k].ShutdownQueued = $true
-                } else {
-                    Stop-Process -Id $k -Force -ErrorAction SilentlyContinue
-                }
+                if ($conf.enableApi -and $conf.allowMonitorApi) { $Global:PortMap[$k].ShutdownQueued = $true } 
+                else { Stop-Process -Id $k -Force -ErrorAction SilentlyContinue }
             }
-
             $Global:PendingSilentDLLUpdate = $true
             return $false 
         }
         
-        $conf = Get-MonitorConfig
-        $conf.pauseSpawning = $true
-        Save-MonitorConfig $conf
+        $conf = Get-MonitorConfig; $conf.pauseSpawning = $true; Save-MonitorConfig $conf
         
         $msg = "Cannot update DLLs while instances are running.`n`nSpawning has been PAUSED.`nPlease manually close all EchoVR instances now, then click OK to proceed."
         $res = [System.Windows.Forms.MessageBox]::Show($msg, "Action Required", [System.Windows.Forms.MessageBoxButtons]::OKCancel, [System.Windows.Forms.MessageBoxIcon]::Warning)
@@ -1511,24 +1501,19 @@ Function Test-ForUpdates ($ManualCheck = $false) {
 
     try {
         if ($ManualCheck) { [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor }
-
         try {
             $headers = @{ "Cache-Control" = "no-cache"; "Pragma" = "no-cache" }
             $response = Invoke-RestMethod -Uri $apiUrl -Method Get -Headers $headers -ErrorAction Stop
             $monitorAsset = $response.assets | Where-Object { $_.name -eq $TargetFileName } | Select-Object -First 1
-            
             if ($monitorAsset) {
                 $latestTag = $response.tag_name -replace "^v", ""
                 $currentVer = $Global:Version -replace "^v", ""
-                if ([System.Version]$latestTag -gt [System.Version]$currentVer) {
-                    $monitorUpdateAvailable = $true; $monitorAssetUrl = $monitorAsset.browser_download_url
-                }
+                if ([System.Version]$latestTag -gt [System.Version]$currentVer) { $monitorUpdateAvailable = $true; $monitorAssetUrl = $monitorAsset.browser_download_url }
             }
         } catch { if ($ManualCheck) { Write-Warning "Could not connect to GitHub API." } }
 
         $pnsradValid = Test-FileHash $Script:Path_PNSRAD $Global:Hash_PNSRAD
         $dbgValid = Test-FileHash $Script:Path_DBGCORE $Global:Hash_DBGCORE
-        
         if (-not $pnsradValid -or -not $dbgValid) { $dllUpdateAvailable = $true }
 
         if ($monitorUpdateAvailable -and $dllUpdateAvailable) {
@@ -1537,7 +1522,6 @@ Function Test-ForUpdates ($ManualCheck = $false) {
                 $res = [System.Windows.Forms.MessageBox]::Show($msg, "Critical Updates Found", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Exclamation)
                 if ($res -eq [System.Windows.Forms.DialogResult]::Yes) { if (Update-DLLs) { Invoke-MonitorUpdate -downloadUrl $monitorAssetUrl } }
             } else {
-                # Save the URL so the background loop can trigger it after the DLLs finish
                 $Global:PendingMonitorUpdateUrl = $monitorAssetUrl
                 if (Update-DLLs -Silent $true) { Invoke-MonitorUpdate -downloadUrl $monitorAssetUrl }
             }
@@ -1549,9 +1533,7 @@ Function Test-ForUpdates ($ManualCheck = $false) {
                 $msg = "New Monitor Version Available: $($response.tag_name)`n`nUpdate now?"
                 $res = [System.Windows.Forms.MessageBox]::Show($msg, "Monitor Update", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
                 if ($res -eq [System.Windows.Forms.DialogResult]::Yes) { Invoke-MonitorUpdate -downloadUrl $monitorAssetUrl }
-            } else {
-                Invoke-MonitorUpdate -downloadUrl $monitorAssetUrl
-            }
+            } else { Invoke-MonitorUpdate -downloadUrl $monitorAssetUrl }
             return
         }
 
@@ -1560,14 +1542,10 @@ Function Test-ForUpdates ($ManualCheck = $false) {
                 $msg = "Your local server DLLs do not match the required versions.`n`nUpdate pnsradgameserver.dll and dbgcore.dll now?"
                 $res = [System.Windows.Forms.MessageBox]::Show($msg, "DLL Integrity Check", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
                 if ($res -eq [System.Windows.Forms.DialogResult]::Yes) { Update-DLLs }
-            } else {
-                Update-DLLs -Silent $true
-            }
+            } else { Update-DLLs -Silent $true }
             return
         }
-
         if ($ManualCheck) { [System.Windows.Forms.MessageBox]::Show("Everything is up to date.`n`nMonitor: v$($Global:Version)`nDLLs: Verified", "Up to Date", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) }
-
     } catch {
         if ($ManualCheck) { [System.Windows.Forms.MessageBox]::Show("Update check failed: $_", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) }
     } finally {
@@ -1577,6 +1555,7 @@ Function Test-ForUpdates ($ManualCheck = $false) {
 
 Function Invoke-MonitorUpdate ($downloadUrl) {
     try {
+        Write-MonitorLog "Monitor exited by update"
         Save-PortMap
         $currentFile = $Global:ExecutionPath
         $currentDir = [System.IO.Path]::GetDirectoryName($currentFile)
@@ -1613,21 +1592,19 @@ del "%~f0"
 }
 
 # ==============================================================================
-# 11. EXECUTION
+# 12. EXECUTION
 # ==============================================================================
 
 try {
-    $initConf = Get-MonitorConfig
-    if (Test-ShouldRunAutoUpdate -configObj $initConf) {
+    if (Test-ShouldRunAutoUpdate -configObj $initConfig) {
         Test-ForUpdates -ManualCheck $false
-        $initConf.lastUpdateCheckDate = (Get-Date).ToString("o")
-        Save-MonitorConfig $initConf
+        $initConfig.lastUpdateCheckDate = (Get-Date).ToString("o")
+        Save-MonitorConfig $initConfig
     }
 
     $MonitorTimer.Start()
     [System.Windows.Forms.Application]::Run()
 } finally {
-    # Ensure Mutex is always released, even on crash
     if ($null -ne $mutex) {
         $mutex.ReleaseMutex()
         $mutex.Dispose()
